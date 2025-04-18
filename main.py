@@ -600,7 +600,7 @@ class SwitchPortWidget(QWidget):
     def __init__(self, switch, main_window=None, parent=None):
         super().__init__(parent)
         self.switch = switch
-        self.main_window = main_window  # Référence à la fenêtre principale
+        self.main_window = main_window
         self.selected_port = None
         self.setMinimumSize(600, 300)
         
@@ -608,32 +608,116 @@ class SwitchPortWidget(QWidget):
         self.color_legend = {
             "shutdown": QColor(255, 0, 0),    # Rouge
             "trunk": QColor(0, 0, 255),       # Bleu
-            "access": QColor(0, 255, 0),      # Vert (défaut pour les VLAN access)
-            "default": QColor(150, 150, 150)  # Gris (port non configuré)
+            "access": QColor(0, 255, 0),      # Vert
+            "default": QColor(150, 150, 150)  # Gris
         }
         
         # Couleurs pour les VLANs (générées dynamiquement)
         self.vlan_colors = {}
         self.generate_vlan_colors()
+        
+        # Pré-calculs pour éviter de recalculer à chaque frame
+        self.layout_data = None
     
     def generate_vlan_colors(self):
         """Génère des couleurs distinctives pour chaque VLAN configuré"""
         self.vlan_colors = {}
         for vlan_id in self.switch.vlans.keys():
-            # Utiliser une formule pour générer des couleurs bien distinctes
             hue = (vlan_id * 50) % 360
             self.vlan_colors[vlan_id] = QColor.fromHsv(hue, 200, 200)
+    
+    def calculate_layout(self):
+        """Pré-calcule les données de mise en page pour optimiser le rendu"""
+        layout = self.switch.port_layout
+        rows = 2  # Format 1U standard
+        cols = layout["total_ports"] // rows
+        
+        # Dimensions et espacements
+        chassis_height = min(120, self.height() * 0.3)
+        available_width = self.width() - 40
+        available_height = chassis_height - 30
+        
+        port_size = min(available_height / rows * 0.8, available_width / cols * 0.8)
+        h_spacing = (available_width - port_size * cols) / (cols + 1)
+        v_spacing = (available_height - port_size * rows) / (rows + 1)
+        
+        y_start = 30
+        y_top = y_start + v_spacing
+        y_bottom = y_start + v_spacing + port_size + v_spacing
+        
+        # Stocker les données calculées pour réutilisation
+        self.layout_data = {
+            'rows': rows,
+            'cols': cols,
+            'chassis_height': chassis_height,
+            'port_size': port_size,
+            'h_spacing': h_spacing,
+            'v_spacing': v_spacing,
+            'y_start': y_start,
+            'y_top': y_top,
+            'y_bottom': y_bottom
+        }
+        
+        return self.layout_data
+    
+    def get_port_color(self, port_number):
+        """Détermine la couleur d'un port selon sa configuration"""
+        port_config = self.switch.ports.get(port_number, {})
+        if not port_config:
+            return self.color_legend["default"]
+        
+        if port_config['mode'] == 'shutdown':
+            return self.color_legend["shutdown"]
+        elif port_config['mode'] == 'trunk':
+            return self.color_legend["trunk"]
+        elif port_config['mode'] == 'access':
+            vlan_id = port_config.get('vlan')
+            if vlan_id and vlan_id in self.vlan_colors:
+                return self.vlan_colors[vlan_id]
+            return self.color_legend["access"]
+        
+        return self.color_legend["default"]
+    
+    def draw_port(self, painter, port_number, x, y, size):
+        """Dessine un port avec son numéro"""
+        # Obtenir la couleur du port
+        color = self.get_port_color(port_number)
+        
+        # Dessiner le port carré
+        painter.setBrush(QBrush(color))
+        painter.setPen(QPen(Qt.black, 1))
+        painter.drawRect(int(x), int(y), int(size), int(size))
+        
+        # Numéro de port
+        painter.setPen(Qt.black)
+        font = painter.font()
+        font.setBold(False)
+        font.setPointSize(7)
+        painter.setFont(font)
+        text_x = x + size/2 - 5
+        text_y = y + size/2 + 3
+        painter.drawText(int(text_x), int(text_y), str(port_number))
     
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # Dessiner le chassis du switch (format 1U - plus plat)
+        # Recalculer la mise en page si nécessaire
+        if self.layout_data is None or self.layout_data['chassis_height'] != min(120, self.height() * 0.3):
+            self.calculate_layout()
+        
+        # Extraire les données de mise en page
+        layout = self.switch.port_layout
+        cols = self.layout_data['cols']
+        chassis_height = self.layout_data['chassis_height']
+        port_size = self.layout_data['port_size']
+        h_spacing = self.layout_data['h_spacing']
+        y_top = self.layout_data['y_top']
+        y_bottom = self.layout_data['y_bottom']
+        
+        # Dessiner le chassis du switch (format 1U)
         painter.setPen(QPen(Qt.black, 2))
         painter.setBrush(QBrush(QColor(200, 200, 200)))
-        
-        # Réduire la hauteur du châssis pour qu'il ressemble plus à du 1U
-        chassis_height = min(120, self.height() * 0.3)  # Hauteur réduite pour le format 1U
         painter.drawRect(10, 10, self.width() - 20, chassis_height)
         
         # Dessiner le nom du switch
@@ -644,101 +728,30 @@ class SwitchPortWidget(QWidget):
         painter.setFont(font)
         painter.drawText(20, 25, f"{self.switch.hostname} - {self.switch.brand} {self.switch.model}")
         
-        # Calculer la disposition des ports
-        layout = self.switch.port_layout
-        rows = 2  # Toujours 2 rangées pour un format 1U
-        cols = layout["total_ports"] // rows  # Répartir les ports équitablement sur 2 rangées
-        
-        # Calculer la taille et l'espacement des ports
-        available_width = self.width() - 40
-        available_height = chassis_height - 30
-        
-        # Déterminer la taille des ports comme des carrés
-        port_size = min(available_height / rows * 0.8, available_width / cols * 0.8)
-        
-        # Calculer l'espacement horizontal entre les ports
-        h_spacing = (available_width - port_size * cols) / (cols + 1)
-        v_spacing = (available_height - port_size * rows) / (rows + 1)
-        
-        # Dessiner les ports avec les ports impairs en haut et pairs en bas
-        y_start = 30  # Position de départ Y (après le nom du switch)
-        y_top = y_start + v_spacing  # Rangée supérieure
-        y_bottom = y_start + v_spacing + port_size + v_spacing  # Rangée inférieure
-        
-        # Dessiner les ports (impairs en haut, pairs en bas)
+        # Dessiner tous les ports (impairs en haut, pairs en bas)
         for col in range(cols):
-            # Ports impairs (rangée supérieure)
-            port_number = col * 2 + 1  # 1, 3, 5...
+            # Port impair (rangée supérieure)
+            port_number = col * 2 + 1
             if port_number <= layout["total_ports"]:
                 x = 20 + h_spacing + col * (port_size + h_spacing)
-                
-                # Couleur du port selon sa configuration
-                port_config = self.switch.ports.get(port_number, {})
-                color = self.color_legend["default"]  # Gris par défaut
-                
-                if port_config:
-                    if port_config['mode'] == 'shutdown':
-                        color = self.color_legend["shutdown"]
-                    elif port_config['mode'] == 'trunk':
-                        color = self.color_legend["trunk"]
-                    elif port_config['mode'] == 'access':
-                        # Couleurs différentes selon le VLAN
-                        vlan_id = port_config.get('vlan')
-                        if vlan_id and vlan_id in self.vlan_colors:
-                            color = self.vlan_colors[vlan_id]
-                
-                # Dessiner le port carré
-                painter.setBrush(QBrush(color))
-                painter.setPen(QPen(Qt.black, 1))
-                painter.drawRect(int(x), int(y_top), int(port_size), int(port_size))
-                
-                # Numéro de port
-                painter.setPen(Qt.black)
-                font = painter.font()
-                font.setBold(False)
-                font.setPointSize(7)  # Texte plus petit pour s'adapter à la taille réduite
-                painter.setFont(font)
-                text_x = x + port_size/2 - 5  # Centrer le numéro
-                text_y = y_top + port_size/2 + 3
-                painter.drawText(int(text_x), int(text_y), str(port_number))
+                self.draw_port(painter, port_number, x, y_top, port_size)
             
-            # Ports pairs (rangée inférieure)
-            port_number = col * 2 + 2  # 2, 4, 6...
+            # Port pair (rangée inférieure)
+            port_number = col * 2 + 2
             if port_number <= layout["total_ports"]:
                 x = 20 + h_spacing + col * (port_size + h_spacing)
-                
-                # Couleur du port selon sa configuration
-                port_config = self.switch.ports.get(port_number, {})
-                color = self.color_legend["default"]  # Gris par défaut
-                
-                if port_config:
-                    if port_config['mode'] == 'shutdown':
-                        color = self.color_legend["shutdown"]
-                    elif port_config['mode'] == 'trunk':
-                        color = self.color_legend["trunk"]
-                    elif port_config['mode'] == 'access':
-                        # Couleurs différentes selon le VLAN
-                        vlan_id = port_config.get('vlan')
-                        if vlan_id and vlan_id in self.vlan_colors:
-                            color = self.vlan_colors[vlan_id]
-                
-                # Dessiner le port carré
-                painter.setBrush(QBrush(color))
-                painter.setPen(QPen(Qt.black, 1))
-                painter.drawRect(int(x), int(y_bottom), int(port_size), int(port_size))
-                
-                # Numéro de port
-                painter.setPen(Qt.black)
-                font = painter.font()
-                font.setBold(False)
-                font.setPointSize(7)
-                painter.setFont(font)
-                text_x = x + port_size/2 - 5
-                text_y = y_bottom + port_size/2 + 3
-                painter.drawText(int(text_x), int(text_y), str(port_number))
+                self.draw_port(painter, port_number, x, y_bottom, port_size)
         
-        # Dessiner la légende des modes de port en bas du widget
-        legend_y = chassis_height + 20
+        # Dessiner la légende des modes de port avec un décalage vertical ajusté
+        legend_y_pos = chassis_height + 30  # Augmenté de 20 à 30 pour plus d'espace
+        self.draw_mode_legend(painter, legend_y_pos)
+        
+        # Dessiner la légende des VLANs si nécessaire avec un espacement plus grand
+        if self.switch.vlans:
+            self.draw_vlan_legend(painter, legend_y_pos + 65)  # Augmenté de 55 à 65 pour éviter le chevauchement
+    
+    def draw_mode_legend(self, painter, y_pos):
+        """Dessine la légende des modes de ports avec tout le texte en blanc"""
         legend_items = [
             ("Non configuré", self.color_legend["default"]),
             ("Access", self.color_legend["access"]),
@@ -747,111 +760,130 @@ class SwitchPortWidget(QWidget):
         ]
         
         legend_width = self.width() / len(legend_items)
+        
+        # Titre de la légende - décalé vers le bas
         font = painter.font()
         font.setBold(True)
         font.setPointSize(9)
         painter.setFont(font)
-        painter.drawText(20, legend_y - 15, "Modes de port:")
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(20, y_pos - 5, "Modes de port:")  # Décalé de -15 à -5 pixels
         
+        # Éléments de légende - ajustés à cause du titre décalé
         font.setBold(False)
         font.setPointSize(8)
         painter.setFont(font)
-        for i, (text, color) in enumerate(legend_items):
-            x = 20 + i * legend_width
-            painter.setBrush(QBrush(color))
-            painter.setPen(QPen(Qt.black, 1))
-            painter.drawRect(int(x), int(legend_y), 15, 15)
-            painter.drawText(int(x + 20), int(legend_y + 12), text)
         
-        # Dessiner la légende des VLANs
-        if self.switch.vlans:
-            vlan_legend_y = legend_y + 35
+        for i, (text, bg_color) in enumerate(legend_items):
+            x = 20 + i * legend_width
             
-            # Titre de la légende des VLANs
-            font.setBold(True)
-            font.setPointSize(9)
-            painter.setFont(font)
-            painter.drawText(20, vlan_legend_y - 15, "VLANs:")
+            # Dessiner le carré de couleur avec ajustement vertical
+            painter.setBrush(QBrush(bg_color))
+            painter.setPen(QPen(Qt.black, 1))
+            painter.drawRect(int(x), int(y_pos + 10), 15, 15)  # Ajouté +10 pixels
             
-            font.setBold(False)
-            font.setPointSize(8)
-            painter.setFont(font)
+            # Dessiner le texte avec ajustement vertical
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(int(x + 20), int(y_pos + 22), text)  # Ajouté +10 pixels
+    
+    def draw_vlan_legend(self, painter, y_pos):
+        """Dessine la légende des VLANs configurés avec tout le texte en blanc"""
+        # Titre de la légende - décalé vers le bas
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSize(9)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(20, y_pos - 5, "VLANs:")  # Décalé de -15 à -5 pixels
+        
+        # Configuration de la police
+        font.setBold(False)
+        font.setPointSize(8)
+        painter.setFont(font)
+        
+        # Calculer la largeur pour chaque VLAN (max 8 par ligne)
+        max_per_row = 8
+        vlan_legend_width = (self.width() - 40) / min(len(self.switch.vlans), max_per_row)
+        
+        # Dessiner chaque VLAN avec ajustement vertical
+        vlan_count = 0
+        for vlan_id, vlan_name in self.switch.vlans.items():
+            row_offset = (vlan_count // max_per_row) * 20
+            col_position = vlan_count % max_per_row
             
-            # Calculer la largeur pour chaque VLAN dans la légende
-            vlan_legend_width = (self.width() - 40) / min(len(self.switch.vlans), 8)  # Limiter à 8 VLAN par ligne
+            x = 20 + col_position * vlan_legend_width
+            y = y_pos + 10 + row_offset  # Ajouté +10 pixels
             
-            # Afficher les couleurs associées aux VLANs
-            vlan_count = 0
-            for vlan_id, vlan_name in self.switch.vlans.items():
-                # Sauter à la ligne suivante si nécessaire
-                row_offset = (vlan_count // 8) * 20  # 8 VLAN par ligne, 20 pixels de hauteur
-                col_position = vlan_count % 8
+            if vlan_id in self.vlan_colors:
+                # Carré de couleur
+                color = self.vlan_colors[vlan_id]
+                painter.setBrush(QBrush(color))
+                painter.setPen(QPen(Qt.black, 1))
+                painter.drawRect(int(x), int(y), 15, 15)
                 
-                x = 20 + col_position * vlan_legend_width
-                y = vlan_legend_y + row_offset
+                # Texte toujours blanc comme montré dans l'image
+                painter.setPen(QColor(255, 255, 255))
                 
-                if vlan_id in self.vlan_colors:
-                    color = self.vlan_colors[vlan_id]
-                    painter.setBrush(QBrush(color))
-                    painter.setPen(QPen(Qt.black, 1))
-                    painter.drawRect(int(x), int(y), 15, 15)
-                    # Limiter le texte à la largeur disponible
-                    display_name = f"{vlan_id} - {vlan_name}"
-                    if len(display_name) > 20:  # Limiter la longueur
-                        display_name = display_name[:17] + "..."
-                    painter.drawText(int(x + 20), int(y + 12), display_name)
-                vlan_count += 1
+                # Texte (limité en longueur)
+                display_name = f"{vlan_id} - {vlan_name}"
+                if len(display_name) > 20:
+                    display_name = display_name[:17] + "..."
+                painter.drawText(int(x + 20), int(y + 12), display_name)
+            
+            vlan_count += 1
+        
+        # Réinitialiser la couleur du stylo à noir pour le reste du dessin
+        painter.setPen(Qt.black)
+    
+    def get_port_at_position(self, x, y):
+        """Détermine quel port est à la position (x,y)"""
+        if not self.layout_data:
+            self.calculate_layout()
+            
+        # Extraire les données de mise en page
+        layout = self.switch.port_layout
+        cols = self.layout_data['cols']
+        port_size = self.layout_data['port_size']
+        h_spacing = self.layout_data['h_spacing']
+        y_top = self.layout_data['y_top']
+        y_bottom = self.layout_data['y_bottom']
+        
+        # Vérifier si c'est sur la rangée du haut (ports impairs)
+        if y_top <= y <= y_top + port_size:
+            for col in range(cols):
+                x_pos = 20 + h_spacing + col * (port_size + h_spacing)
+                if x_pos <= x <= x_pos + port_size:
+                    port_number = col * 2 + 1  # Ports impairs: 1, 3, 5...
+                    if port_number <= layout["total_ports"]:
+                        return port_number
+        
+        # Vérifier si c'est sur la rangée du bas (ports pairs)
+        elif y_bottom <= y <= y_bottom + port_size:
+            for col in range(cols):
+                x_pos = 20 + h_spacing + col * (port_size + h_spacing)
+                if x_pos <= x <= x_pos + port_size:
+                    port_number = col * 2 + 2  # Ports pairs: 2, 4, 6...
+                    if port_number <= layout["total_ports"]:
+                        return port_number
+        
+        return None
     
     def mousePressEvent(self, event):
-        # Déterminer sur quel port l'utilisateur a cliqué
-        layout = self.switch.port_layout
-        rows = 2  # Toujours 2 rangées pour un format 1U
-        cols = layout["total_ports"] // rows
+        port_number = self.get_port_at_position(event.position().x(), event.position().y())
         
-        # Calculer la taille et l'espacement des ports (identiques à paintEvent)
-        available_width = self.width() - 40
-        available_height = chassis_height = min(120, self.height() * 0.3) - 30
-        
-        port_size = min(available_height / rows * 0.8, available_width / cols * 0.8)
-        h_spacing = (available_width - port_size * cols) / (cols + 1)
-        v_spacing = (available_height - port_size * rows) / (rows + 1)
-        
-        x, y = event.position().x(), event.position().y()
-        y_start = 30
-        
-        # Position des rangées (identiques à paintEvent)
-        y_top = y_start + v_spacing  # Rangée supérieure - ports impairs
-        y_bottom = y_start + v_spacing + port_size + v_spacing  # Rangée inférieure - ports pairs
-        
-        # Vérifier si le clic est sur un port
-        for col in range(cols):
-            x_pos = 20 + h_spacing + col * (port_size + h_spacing)
-            
-            # Vérifier rangée supérieure (ports impairs)
-            if x_pos <= x <= x_pos + port_size and y_top <= y <= y_top + port_size:
-                port_number = col * 2 + 1  # Ports impairs: 1, 3, 5...
-                if port_number <= layout["total_ports"]:
-                    self.selected_port = port_number
-                    if self.main_window and hasattr(self.main_window, 'show_port_config_dialog'):
-                        self.main_window.show_port_config_dialog(port_number)
-                    else:
-                        if ENDORIUM_AVAILABLE:
-                            logger.error(f"Impossible de configurer le port {port_number}, fenêtre principale non disponible")
-                        print(f"Erreur: impossible de configurer le port {port_number}")
-                return
-                
-            # Vérifier rangée inférieure (ports pairs)
-            if x_pos <= x <= x_pos + port_size and y_bottom <= y <= y_bottom + port_size:
-                port_number = col * 2 + 2  # Ports pairs: 2, 4, 6...
-                if port_number <= layout["total_ports"]:
-                    self.selected_port = port_number
-                    if self.main_window and hasattr(self.main_window, 'show_port_config_dialog'):
-                        self.main_window.show_port_config_dialog(port_number)
-                    else:
-                        if ENDORIUM_AVAILABLE:
-                            logger.error(f"Impossible de configurer le port {port_number}, fenêtre principale non disponible")
-                        print(f"Erreur: impossible de configurer le port {port_number}")
-                return
+        if port_number:
+            self.selected_port = port_number
+            if self.main_window and hasattr(self.main_window, 'show_port_config_dialog'):
+                self.main_window.show_port_config_dialog(port_number)
+            else:
+                if ENDORIUM_AVAILABLE:
+                    logger.error(f"Impossible de configurer le port {port_number}, fenêtre principale non disponible")
+                print(f"Erreur: impossible de configurer le port {port_number}")
+    
+    def resizeEvent(self, event):
+        # Forcer le recalcul de la disposition lors du redimensionnement
+        self.layout_data = None
+        super().resizeEvent(event)
 
 # Dialogue de configuration pour un port
 class PortConfigDialog(QDialog):
@@ -1456,4 +1488,5 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
 
