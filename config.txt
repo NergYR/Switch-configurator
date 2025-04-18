@@ -1,0 +1,164 @@
+configure
+hostname Switch
+vlan 10
+ name admin
+exit
+vlan 122
+ name Video
+exit
+vlan 132
+ name Surveillance
+exit
+vlan 21
+ name ContreAcces
+exit
+vlan 213
+ name ToIP
+exit
+interface 1
+ untagged vlan 122
+exit
+interface 2
+ untagged vlan 122
+exit
+interface 3
+ untagged vlan 122
+exit
+interface 4
+ untagged vlan 122
+exit
+interface 5
+ untagged vlan 122
+exit
+interface 6
+ untagged vlan 122
+exit
+interface 7
+ untagged vlan 122
+exit
+interface 8
+ untagged vlan 122
+exit
+interface 9
+ untagged vlan 122
+exit
+interface 10
+ untagged vlan 122
+exit
+interface 11
+ untagged vlan 122
+exit
+interface 12
+ untagged vlan 122
+exit
+interface 13
+ untagged vlan 122
+exit
+interface 14
+ untagged vlan 122
+exit
+interface 15
+ untagged vlan 122
+exit
+interface 16
+ untagged vlan 122
+exit
+interface 17
+ untagged vlan 122
+exit
+interface 18
+ untagged vlan 122
+exit
+interface 19
+ untagged vlan 122
+exit
+interface 20
+ untagged vlan 122
+exit
+interface 21
+ untagged vlan 122
+exit
+interface 47
+ tagged vlan 10,122,132,21,213
+exit
+interface 48
+ tagged vlan 10,122,132,21,213
+exit
+interface 22
+ untagged vlan 21
+exit
+interface 23
+ untagged vlan 21
+exit
+interface 24
+ untagged vlan 21
+exit
+interface 46
+ untagged vlan 10
+exit
+interface 25
+ untagged vlan 213
+exit
+interface 26
+ untagged vlan 213
+exit
+interface 27
+ untagged vlan 213
+exit
+interface 28
+ untagged vlan 213
+exit
+interface 29
+ untagged vlan 213
+exit
+interface 30
+ untagged vlan 213
+exit
+interface 31
+ untagged vlan 213
+exit
+interface 32
+ untagged vlan 213
+exit
+interface 33
+ untagged vlan 213
+exit
+interface 34
+ untagged vlan 213
+exit
+interface 35
+ untagged vlan 213
+exit
+interface 36
+ untagged vlan 213
+exit
+interface 37
+ untagged vlan 213
+exit
+interface 38
+ untagged vlan 213
+exit
+interface 39
+ untagged vlan 213
+exit
+interface 40
+ disable
+exit
+interface 41
+ disable
+exit
+interface 42
+ disable
+exit
+interface 43
+ disable
+exit
+interface 44
+ disable
+exit
+interface 45
+ disable
+exit
+hostname Switch
+no telnet-server
+password manager user-name admin plaintext
