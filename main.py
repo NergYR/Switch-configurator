@@ -6,37 +6,20 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QLabel, QPushButton, QComboBox, QLineEdit, QGridLayout,
                             QScrollArea, QTableWidget, QTableWidgetItem, QMessageBox,
                             QTabWidget, QFrame, QGroupBox, QFormLayout, QDialog, QDialogButtonBox,
-                            QTextEdit, QCheckBox, QProgressBar)
+                            QTextEdit, QCheckBox, QProgressBar, QInputDialog)
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush
 
+# Configuration de l'application
+APP_NAME = "Switch-configurator"
+APP_VERSION = "1.0.0"
+
+# Vérification de la disponibilité d'EndoriumUtils
 try:
     from EndoriumUtils import get_logger, log_function_call, log_performance
     from EndoriumUtils import get_version, increment_version, set_version
     ENDORIUM_AVAILABLE = True
-except ImportError:
-    print("EndoriumUtils non trouvé. Fonctionnalités de journalisation désactivées.")
-    ENDORIUM_AVAILABLE = False
-
-# Importation des fonctions TFTP
-try:
-    from tftp_helper import is_tftp_available, upload_config_via_tftp
-    TFTP_AVAILABLE = is_tftp_available()
-    if ENDORIUM_AVAILABLE and TFTP_AVAILABLE:
-        logger.info("Module TFTP disponible et chargé")
-    elif ENDORIUM_AVAILABLE:
-        logger.warning("Module TFTP non disponible. Les fonctionnalités TFTP seront désactivées.")
-except ImportError:
-    TFTP_AVAILABLE = False
-    if ENDORIUM_AVAILABLE:
-        logger.warning("Module TFTP non disponible. Installez-le avec 'pip install tftpy'")
-    print("Module TFTP non disponible. Installez-le avec 'pip install tftpy'")
-
-# Configuration de la version et du logger
-APP_NAME = "Switch-configurator"
-APP_VERSION = "1.0.0"
-
-if ENDORIUM_AVAILABLE:
+    
     # Initialisation du logger avec le nom de l'application
     logger = get_logger(APP_NAME)
     
@@ -50,9 +33,25 @@ if ENDORIUM_AVAILABLE:
         set_version(APP_VERSION)
     
     logger.info(f"Application démarrée - version {APP_VERSION}")
-else:
+except ImportError:
+    print("EndoriumUtils non trouvé. Fonctionnalités de journalisation désactivées.")
+    ENDORIUM_AVAILABLE = False
     # Fallback si EndoriumUtils n'est pas disponible
     logger = None
+
+# Importation des fonctions TFTP
+try:
+    from tftp_helper import is_tftp_available, upload_config_via_tftp
+    TFTP_AVAILABLE = is_tftp_available()
+    if ENDORIUM_AVAILABLE and TFTP_AVAILABLE:
+        logger.info("Module TFTP disponible et chargé")
+    elif ENDORIUM_AVAILABLE:
+        logger.warning("Module TFTP non disponible. Les fonctionnalités TFTP seront désactivées.")
+except ImportError:
+    TFTP_AVAILABLE = False
+    if ENDORIUM_AVAILABLE and logger is not None:
+        logger.warning("Module TFTP non disponible. Installez-le avec 'pip install tftpy'")
+    print("Module TFTP non disponible. Installez-le avec 'pip install tftpy'")
 
 # Classe pour gérer les modèles de switch
 class SwitchTemplateManager:
@@ -110,7 +109,7 @@ class Switch:
         self.brand = brand
         self.model = model
         self.vlans = {}  # {id: name}
-        self.ports = {}  # {port_number: {'mode': 'access/trunk/shutdown', 'vlan': id}}
+        self.ports = {}  # {port_number: {'mode': 'access/trunk/shutdown', 'vlan': id, 'poe': bool}}
         self.vlan_interfaces = {}  # {vlan_id: {'ip': ip_address, 'mask': mask, ...}}
         self.hostname = f"{brand}-{model}"
         
@@ -119,6 +118,9 @@ class Switch:
             self.template = self._load_template(brand, model)
             # Définir la disposition des ports selon le modèle
             self.port_layout = self._get_port_layout()
+        
+        # Vérifier si le switch supporte le PoE
+        self.supports_poe = self._supports_poe()
         
         if ENDORIUM_AVAILABLE:
             logger.info(f"Switch {brand} {model} initialisé")
@@ -145,6 +147,12 @@ class Switch:
             logger.warning(f"Aucun layout de ports trouvé dans le template, utilisation des valeurs par défaut: {default_layout}")
         return default_layout
     
+    def _supports_poe(self):
+        """Vérifie si le switch supporte le PoE"""
+        if self.template and "supports" in self.template:
+            return self.template["supports"].get("poe", False)
+        return False
+    
     @log_function_call if ENDORIUM_AVAILABLE else lambda f: f
     def add_vlan(self, vlan_id, vlan_name):
         self.vlans[vlan_id] = vlan_name
@@ -152,10 +160,10 @@ class Switch:
             logger.info(f"VLAN ajouté: ID {vlan_id}, Nom {vlan_name}")
     
     @log_function_call if ENDORIUM_AVAILABLE else lambda f: f
-    def set_port_config(self, port_number, mode, vlan=None):
-        self.ports[port_number] = {'mode': mode, 'vlan': vlan}
+    def set_port_config(self, port_number, mode, vlan=None, poe_enabled=False):
+        self.ports[port_number] = {'mode': mode, 'vlan': vlan, 'poe': poe_enabled}
         if ENDORIUM_AVAILABLE:
-            logger.info(f"Port {port_number} configuré: mode={mode}, vlan={vlan}")
+            logger.info(f"Port {port_number} configuré: mode={mode}, vlan={vlan}, poe={poe_enabled}")
     
     @log_function_call if ENDORIUM_AVAILABLE else lambda f: f
     def set_vlan_interface(self, vlan_id, **kwargs):
@@ -200,6 +208,13 @@ class Switch:
                             config.append(f" switchport access vlan {settings['vlan']}")
                     elif settings['mode'] == 'trunk':
                         config.append(" switchport mode trunk")
+                    
+                    # Configuration PoE si supporté et activé
+                    if self.supports_poe and settings.get('poe', False):
+                        config.append(" power inline auto")
+                    elif self.supports_poe and not settings.get('poe', False):
+                        config.append(" power inline never")
+                    
                     config.append("!")
                 
                 # Configuration des interfaces VLAN
@@ -238,6 +253,13 @@ class Switch:
                             config.append(" untagged vlan " + str(settings['vlan']))
                     elif settings['mode'] == 'trunk':
                         config.append(" tagged vlan " + ",".join([str(v) for v in self.vlans.keys()]))
+                    
+                    # Configuration PoE si supporté et activé
+                    if self.supports_poe and settings.get('poe', False):
+                        config.append(" poe enable")
+                    elif self.supports_poe and not settings.get('poe', False):
+                        config.append(" poe disable")
+                    
                     config.append("exit")
                 
                 # Configuration des interfaces VLAN
@@ -274,6 +296,12 @@ class Switch:
                         config.append(f"set interfaces {interface_name} unit 0 family ethernet-switching port-mode trunk")
                         for vlan_id, vlan_name in self.vlans.items():
                             config.append(f"set interfaces {interface_name} unit 0 family ethernet-switching vlan members {vlan_name}")
+                    
+                    # Configuration PoE si supporté et activé
+                    if self.supports_poe and settings.get('poe', False):
+                        config.append(f"set poe interface {interface_name} enable")
+                    elif self.supports_poe and not settings.get('poe', False):
+                        config.append(f"set poe interface {interface_name} disable")
                 
                 # Configuration des interfaces VLAN
                 for vlan_id, vlan_settings in self.vlan_interfaces.items():
@@ -282,6 +310,94 @@ class Switch:
                         config.append(f"set interfaces irb unit {vlan_id} family inet address {vlan_settings['ip']}/{vlan_settings['mask']}")
                         config.append(f"set vlans {vlan_name} l3-interface irb.{vlan_id}")
                     
+                # Ajouter des commandes de base à partir du template
+                if "default_commands" in self.template:
+                    for cmd in self.template["default_commands"]:
+                        config.append(cmd.replace("{hostname}", self.hostname))
+            
+            elif self.brand.lower() == "aruba":
+                config.append("configure")
+                config.append(f"hostname {self.hostname}")
+                
+                # Configuration des VLANs
+                for vlan_id, vlan_name in self.vlans.items():
+                    config.append(f"vlan {vlan_id}")
+                    config.append(f" name {vlan_name}")
+                    config.append("exit")
+                
+                # Configuration des ports
+                for port, settings in self.ports.items():
+                    config.append(f"interface {port}")
+                    if settings['mode'] == 'shutdown':
+                        config.append(" disable")
+                    elif settings['mode'] == 'access':
+                        if settings.get('vlan'):
+                            config.append(f" vlan access {settings['vlan']}")
+                    elif settings['mode'] == 'trunk':
+                        config.append(" trunk")
+                        for vlan_id in self.vlans.keys():
+                            config.append(f" trunk allowed vlan {vlan_id}")
+                    
+                    # Configuration PoE si supporté et activé
+                    if self.supports_poe and settings.get('poe', False):
+                        config.append(" poe-max-power 30")
+                    elif self.supports_poe and not settings.get('poe', False):
+                        config.append(" no poe")
+                    
+                    config.append("exit")
+                
+                # Configuration des interfaces VLAN
+                for vlan_id, vlan_settings in self.vlan_interfaces.items():
+                    config.append(f"vlan {vlan_id}")
+                    if 'ip' in vlan_settings and 'mask' in vlan_settings:
+                        config.append(f" ip address {vlan_settings['ip']} {vlan_settings['mask']}")
+                    config.append("exit")
+                
+                # Ajouter des commandes de base à partir du template
+                if "default_commands" in self.template:
+                    for cmd in self.template["default_commands"]:
+                        config.append(cmd.replace("{hostname}", self.hostname))
+            
+            elif self.brand.lower() == "alcatel":
+                config.append("configure terminal")
+                config.append(f"hostname {self.hostname}")
+                
+                # Configuration des VLANs
+                for vlan_id, vlan_name in self.vlans.items():
+                    config.append(f"vlan {vlan_id} name {vlan_name} admin-state enable")
+                
+                # Configuration des ports
+                for port, settings in self.ports.items():
+                    port_name = f"1/1/{port}"
+                    config.append(f"interfaces port {port_name}")
+                    
+                    if settings['mode'] == 'shutdown':
+                        config.append(" admin-state disable")
+                    else:
+                        config.append(" admin-state enable")
+                        
+                    if settings['mode'] == 'access':
+                        if settings.get('vlan'):
+                            config.append(f" vlan port default {settings['vlan']} enable")
+                    elif settings['mode'] == 'trunk':
+                        for vlan_id in self.vlans.keys():
+                            config.append(f" vlan port {vlan_id} enable")
+                    
+                    # Configuration PoE si supporté et activé
+                    if self.supports_poe and settings.get('poe', False):
+                        config.append(" power poe admin-state enable")
+                    elif self.supports_poe and not settings.get('poe', False):
+                        config.append(" power poe admin-state disable")
+                    
+                    config.append("exit")
+                
+                # Configuration des interfaces VLAN
+                for vlan_id, vlan_settings in self.vlan_interfaces.items():
+                    config.append(f"interfaces vlan {vlan_id}")
+                    if 'ip' in vlan_settings and 'mask' in vlan_settings:
+                        config.append(f" ip address {vlan_settings['ip']} {vlan_settings['mask']}")
+                    config.append("exit")
+                
                 # Ajouter des commandes de base à partir du template
                 if "default_commands" in self.template:
                     for cmd in self.template["default_commands"]:
@@ -512,65 +628,117 @@ class SwitchPortWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # Dessiner le chassis du switch
+        # Dessiner le chassis du switch (format 1U - plus plat)
         painter.setPen(QPen(Qt.black, 2))
         painter.setBrush(QBrush(QColor(200, 200, 200)))
-        painter.drawRect(10, 10, self.width() - 20, self.height() - 20)
+        
+        # Réduire la hauteur du châssis pour qu'il ressemble plus à du 1U
+        chassis_height = min(120, self.height() * 0.3)  # Hauteur réduite pour le format 1U
+        painter.drawRect(10, 10, self.width() - 20, chassis_height)
         
         # Dessiner le nom du switch
         painter.setPen(Qt.black)
         font = painter.font()
         font.setBold(True)
-        font.setPointSize(12)
+        font.setPointSize(10)
         painter.setFont(font)
-        painter.drawText(20, 30, f"{self.switch.hostname} - {self.switch.brand} {self.switch.model}")
+        painter.drawText(20, 25, f"{self.switch.hostname} - {self.switch.brand} {self.switch.model}")
         
-        # Calculer la taille des ports
+        # Calculer la disposition des ports
         layout = self.switch.port_layout
-        rows = layout["rows"]
-        cols = layout["cols"]
-        port_width = (self.width() - 40) / cols
-        port_height = (self.height() - 120) / rows  # Ajustement pour laisser plus de place à la légende
+        rows = 2  # Toujours 2 rangées pour un format 1U
+        cols = layout["total_ports"] // rows  # Répartir les ports équitablement sur 2 rangées
         
-        # Dessiner les ports
-        port_number = 1
-        for row in range(rows):
-            for col in range(cols):
-                if port_number <= layout["total_ports"]:
-                    x = 20 + col * port_width
-                    y = 50 + row * port_height  # Décalage pour laisser de la place au nom du switch
-                    
-                    # Couleur du port selon sa configuration
-                    port_config = self.switch.ports.get(port_number, {})
-                    color = self.color_legend["default"]  # Gris par défaut
-                    
-                    if port_config:
-                        if port_config['mode'] == 'shutdown':
-                            color = self.color_legend["shutdown"]
-                        elif port_config['mode'] == 'trunk':
-                            color = self.color_legend["trunk"]
-                        elif port_config['mode'] == 'access':
-                            # Couleurs différentes selon le VLAN
-                            vlan_id = port_config.get('vlan')
-                            if vlan_id and vlan_id in self.vlan_colors:
-                                color = self.vlan_colors[vlan_id]
-                    
-                    painter.setBrush(QBrush(color))
-                    painter.setPen(QPen(Qt.black, 1))
-                    painter.drawRect(int(x), int(y), int(port_width - 5), int(port_height - 5))
-                    
-                    # Numéro de port
-                    painter.setPen(Qt.black)
-                    font = painter.font()
-                    font.setBold(False)
-                    font.setPointSize(8)
-                    painter.setFont(font)
-                    painter.drawText(int(x + 5), int(y + port_height/2 + 5), str(port_number))
-                    
-                    port_number += 1
+        # Calculer la taille et l'espacement des ports
+        available_width = self.width() - 40
+        available_height = chassis_height - 30
         
-        # Dessiner la légende des modes de port
-        modes_legend_y = self.height() - 60
+        # Déterminer la taille des ports comme des carrés
+        port_size = min(available_height / rows * 0.8, available_width / cols * 0.8)
+        
+        # Calculer l'espacement horizontal entre les ports
+        h_spacing = (available_width - port_size * cols) / (cols + 1)
+        v_spacing = (available_height - port_size * rows) / (rows + 1)
+        
+        # Dessiner les ports avec les ports impairs en haut et pairs en bas
+        y_start = 30  # Position de départ Y (après le nom du switch)
+        y_top = y_start + v_spacing  # Rangée supérieure
+        y_bottom = y_start + v_spacing + port_size + v_spacing  # Rangée inférieure
+        
+        # Dessiner les ports (impairs en haut, pairs en bas)
+        for col in range(cols):
+            # Ports impairs (rangée supérieure)
+            port_number = col * 2 + 1  # 1, 3, 5...
+            if port_number <= layout["total_ports"]:
+                x = 20 + h_spacing + col * (port_size + h_spacing)
+                
+                # Couleur du port selon sa configuration
+                port_config = self.switch.ports.get(port_number, {})
+                color = self.color_legend["default"]  # Gris par défaut
+                
+                if port_config:
+                    if port_config['mode'] == 'shutdown':
+                        color = self.color_legend["shutdown"]
+                    elif port_config['mode'] == 'trunk':
+                        color = self.color_legend["trunk"]
+                    elif port_config['mode'] == 'access':
+                        # Couleurs différentes selon le VLAN
+                        vlan_id = port_config.get('vlan')
+                        if vlan_id and vlan_id in self.vlan_colors:
+                            color = self.vlan_colors[vlan_id]
+                
+                # Dessiner le port carré
+                painter.setBrush(QBrush(color))
+                painter.setPen(QPen(Qt.black, 1))
+                painter.drawRect(int(x), int(y_top), int(port_size), int(port_size))
+                
+                # Numéro de port
+                painter.setPen(Qt.black)
+                font = painter.font()
+                font.setBold(False)
+                font.setPointSize(7)  # Texte plus petit pour s'adapter à la taille réduite
+                painter.setFont(font)
+                text_x = x + port_size/2 - 5  # Centrer le numéro
+                text_y = y_top + port_size/2 + 3
+                painter.drawText(int(text_x), int(text_y), str(port_number))
+            
+            # Ports pairs (rangée inférieure)
+            port_number = col * 2 + 2  # 2, 4, 6...
+            if port_number <= layout["total_ports"]:
+                x = 20 + h_spacing + col * (port_size + h_spacing)
+                
+                # Couleur du port selon sa configuration
+                port_config = self.switch.ports.get(port_number, {})
+                color = self.color_legend["default"]  # Gris par défaut
+                
+                if port_config:
+                    if port_config['mode'] == 'shutdown':
+                        color = self.color_legend["shutdown"]
+                    elif port_config['mode'] == 'trunk':
+                        color = self.color_legend["trunk"]
+                    elif port_config['mode'] == 'access':
+                        # Couleurs différentes selon le VLAN
+                        vlan_id = port_config.get('vlan')
+                        if vlan_id and vlan_id in self.vlan_colors:
+                            color = self.vlan_colors[vlan_id]
+                
+                # Dessiner le port carré
+                painter.setBrush(QBrush(color))
+                painter.setPen(QPen(Qt.black, 1))
+                painter.drawRect(int(x), int(y_bottom), int(port_size), int(port_size))
+                
+                # Numéro de port
+                painter.setPen(Qt.black)
+                font = painter.font()
+                font.setBold(False)
+                font.setPointSize(7)
+                painter.setFont(font)
+                text_x = x + port_size/2 - 5
+                text_y = y_bottom + port_size/2 + 3
+                painter.drawText(int(text_x), int(text_y), str(port_number))
+        
+        # Dessiner la légende des modes de port en bas du widget
+        legend_y = chassis_height + 20
         legend_items = [
             ("Non configuré", self.color_legend["default"]),
             ("Access", self.color_legend["access"]),
@@ -583,7 +751,7 @@ class SwitchPortWidget(QWidget):
         font.setBold(True)
         font.setPointSize(9)
         painter.setFont(font)
-        painter.drawText(20, modes_legend_y - 15, "Modes de port:")
+        painter.drawText(20, legend_y - 15, "Modes de port:")
         
         font.setBold(False)
         font.setPointSize(8)
@@ -592,12 +760,12 @@ class SwitchPortWidget(QWidget):
             x = 20 + i * legend_width
             painter.setBrush(QBrush(color))
             painter.setPen(QPen(Qt.black, 1))
-            painter.drawRect(int(x), modes_legend_y, 15, 15)
-            painter.drawText(int(x + 20), modes_legend_y + 12, text)
+            painter.drawRect(int(x), int(legend_y), 15, 15)
+            painter.drawText(int(x + 20), int(legend_y + 12), text)
         
         # Dessiner la légende des VLANs
         if self.switch.vlans:
-            vlan_legend_y = self.height() - 25
+            vlan_legend_y = legend_y + 35
             
             # Titre de la légende des VLANs
             font.setBold(True)
@@ -637,37 +805,61 @@ class SwitchPortWidget(QWidget):
     def mousePressEvent(self, event):
         # Déterminer sur quel port l'utilisateur a cliqué
         layout = self.switch.port_layout
-        rows = layout["rows"]
-        cols = layout["cols"]
-        port_width = (self.width() - 40) / cols
-        port_height = (self.height() - 80) / rows
+        rows = 2  # Toujours 2 rangées pour un format 1U
+        cols = layout["total_ports"] // rows
+        
+        # Calculer la taille et l'espacement des ports (identiques à paintEvent)
+        available_width = self.width() - 40
+        available_height = chassis_height = min(120, self.height() * 0.3) - 30
+        
+        port_size = min(available_height / rows * 0.8, available_width / cols * 0.8)
+        h_spacing = (available_width - port_size * cols) / (cols + 1)
+        v_spacing = (available_height - port_size * rows) / (rows + 1)
         
         x, y = event.position().x(), event.position().y()
+        y_start = 30
         
-        # Tenir compte du décalage pour le nom du switch
-        if 20 <= x <= self.width() - 20 and 50 <= y <= self.height() - 30:
-            col = int((x - 20) / port_width)
-            row = int((y - 50) / port_height)
+        # Position des rangées (identiques à paintEvent)
+        y_top = y_start + v_spacing  # Rangée supérieure - ports impairs
+        y_bottom = y_start + v_spacing + port_size + v_spacing  # Rangée inférieure - ports pairs
+        
+        # Vérifier si le clic est sur un port
+        for col in range(cols):
+            x_pos = 20 + h_spacing + col * (port_size + h_spacing)
             
-            if 0 <= col < cols and 0 <= row < rows:
-                port_number = row * cols + col + 1
+            # Vérifier rangée supérieure (ports impairs)
+            if x_pos <= x <= x_pos + port_size and y_top <= y <= y_top + port_size:
+                port_number = col * 2 + 1  # Ports impairs: 1, 3, 5...
                 if port_number <= layout["total_ports"]:
                     self.selected_port = port_number
-                    # Appeler la méthode de la fenêtre principale, pas du parent
                     if self.main_window and hasattr(self.main_window, 'show_port_config_dialog'):
                         self.main_window.show_port_config_dialog(port_number)
                     else:
-                        # Afficher un message d'erreur si aucune méthode disponible
                         if ENDORIUM_AVAILABLE:
                             logger.error(f"Impossible de configurer le port {port_number}, fenêtre principale non disponible")
                         print(f"Erreur: impossible de configurer le port {port_number}")
+                return
+                
+            # Vérifier rangée inférieure (ports pairs)
+            if x_pos <= x <= x_pos + port_size and y_bottom <= y <= y_bottom + port_size:
+                port_number = col * 2 + 2  # Ports pairs: 2, 4, 6...
+                if port_number <= layout["total_ports"]:
+                    self.selected_port = port_number
+                    if self.main_window and hasattr(self.main_window, 'show_port_config_dialog'):
+                        self.main_window.show_port_config_dialog(port_number)
+                    else:
+                        if ENDORIUM_AVAILABLE:
+                            logger.error(f"Impossible de configurer le port {port_number}, fenêtre principale non disponible")
+                        print(f"Erreur: impossible de configurer le port {port_number}")
+                return
 
 # Dialogue de configuration pour un port
 class PortConfigDialog(QDialog):
-    def __init__(self, port_number, vlans, current_config=None, parent=None):
+    def __init__(self, port_number, vlans, current_config=None, supports_poe=False, parent=None):
         super().__init__(parent)
         self.port_number = port_number
         self.vlans = vlans
+        self.supports_poe = supports_poe
         self.setWindowTitle(f"Configuration du port {port_number}")
         
         layout = QVBoxLayout(self)
@@ -686,6 +878,11 @@ class PortConfigDialog(QDialog):
             self.vlan_combo.addItem(f"{vlan_id} - {vlan_name}", vlan_id)
         form_layout.addRow("VLAN:", self.vlan_combo)
         
+        # Option PoE (si supporté)
+        self.poe_checkbox = QCheckBox("Activer PoE sur ce port")
+        if supports_poe:
+            form_layout.addRow("", self.poe_checkbox)
+        
         layout.addLayout(form_layout)
         
         # Appliquer la configuration actuelle si elle existe
@@ -696,10 +893,14 @@ class PortConfigDialog(QDialog):
                 index = self.vlan_combo.findData(vlan)
                 if index >= 0:
                     self.vlan_combo.setCurrentIndex(index)
+            
+            # État du PoE
+            if supports_poe:
+                self.poe_checkbox.setChecked(current_config.get('poe', False))
         
         # Mettre à jour l'UI en fonction du mode
         self.update_ui(self.mode_combo.currentText())
-        
+            
         # Boutons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -709,12 +910,22 @@ class PortConfigDialog(QDialog):
     def update_ui(self, mode):
         # Activer/désactiver la sélection du VLAN selon le mode
         self.vlan_combo.setEnabled(mode == "access")
+        # Désactiver PoE si le port est en shutdown
+        if self.supports_poe:
+            self.poe_checkbox.setEnabled(mode != "shutdown")
+            if mode == "shutdown":
+                self.poe_checkbox.setChecked(False)
     
     def get_config(self):
         mode = self.mode_combo.currentText()
         result = {'mode': mode}
         if mode == "access":
             result['vlan'] = self.vlan_combo.currentData()
+        
+        # Ajouter l'état du PoE si supporté
+        if self.supports_poe:
+            result['poe'] = self.poe_checkbox.isChecked()
+        
         return result
 
 # Dialogue pour configurer les interfaces VLAN
@@ -784,7 +995,7 @@ class VlanInterfaceDialog(QDialog):
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
             vlan_id = list(self.vlans.keys())[i]
-            
+                
             result[vlan_id] = {
                 'ip': tab.ip_input.text(),
                 'mask': tab.mask_input.text(),
@@ -889,13 +1100,11 @@ class MainWindow(QMainWindow):
         vlan_status_layout.addWidget(QLabel("VLAN"), 0, 0)
         vlan_status_layout.addWidget(QLabel("Adresse IP"), 0, 1)
         vlan_status_layout.addWidget(QLabel("État"), 0, 2)
-        
         row = 1
         for vlan_id, vlan_name in self.switch.vlans.items():
             vlan_settings = self.switch.vlan_interfaces.get(vlan_id, {})
             ip_address = vlan_settings.get('ip', "Non configuré")
             status = "Désactivé" if vlan_settings.get('shutdown', False) else "Actif"
-            
             vlan_status_layout.addWidget(QLabel(f"{vlan_id} - {vlan_name}"), row, 0)
             vlan_status_layout.addWidget(QLabel(ip_address), row, 1)
             vlan_status_layout.addWidget(QLabel(status), row, 2)
@@ -903,7 +1112,6 @@ class MainWindow(QMainWindow):
         
         vlan_interfaces_layout.addLayout(vlan_status_layout)
         vlan_interfaces_layout.addStretch()
-        
         tabs.addTab(vlan_interfaces_tab, "Interfaces VLAN")
         
         # Onglet pour la génération de configuration
@@ -972,7 +1180,7 @@ class MainWindow(QMainWindow):
                 self.switch.set_hostname(hostname)
                 if ENDORIUM_AVAILABLE:
                     logger.info(f"Hostname modifié: {hostname}")
-                
+                    
                 # Mettre à jour l'affichage du switch
                 self.switch_widget.update()
                 
@@ -999,10 +1207,11 @@ class MainWindow(QMainWindow):
     
     def show_port_config_dialog(self, port_number):
         current_config = self.switch.ports.get(port_number, {})
-        dialog = PortConfigDialog(port_number, self.switch.vlans, current_config, self)
+        dialog = PortConfigDialog(port_number, self.switch.vlans, current_config, self.switch.supports_poe, self)
         if dialog.exec():
             config = dialog.get_config()
-            self.switch.set_port_config(port_number, config['mode'], config.get('vlan'))
+            poe_enabled = config.get('poe', False) if self.switch.supports_poe else False
+            self.switch.set_port_config(port_number, config['mode'], config.get('vlan'), poe_enabled)
             self.switch_widget.update()
             if ENDORIUM_AVAILABLE:
                 logger.info(f"Port {port_number} configuré: {config}")
@@ -1047,14 +1256,23 @@ class MainWindow(QMainWindow):
             vlan_combo.addItem(f"{vlan_id} - {vlan_name}", vlan_id)
         form.addRow("VLAN (pour mode access):", vlan_combo)
         
+        # Option PoE (si supporté)
+        poe_checkbox = QCheckBox("Activer PoE sur ces ports")
+        if self.switch.supports_poe:
+            form.addRow("", poe_checkbox)
+        
         layout.addLayout(form)
         
         # Activer/désactiver le combo VLAN selon le mode
-        def update_vlan_combo(mode):
+        def update_ui(mode):
             vlan_combo.setEnabled(mode == "access")
+            if self.switch.supports_poe:
+                poe_checkbox.setEnabled(mode != "shutdown")
+                if mode == "shutdown":
+                    poe_checkbox.setChecked(False)
         
-        mode_combo.currentTextChanged.connect(update_vlan_combo)
-        update_vlan_combo(mode_combo.currentText())
+        mode_combo.currentTextChanged.connect(update_ui)
+        update_ui(mode_combo.currentText())
         
         # Boutons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1073,17 +1291,17 @@ class MainWindow(QMainWindow):
                 
                 mode = mode_combo.currentText()
                 vlan = vlan_combo.currentData() if mode == "access" else None
+                poe_enabled = poe_checkbox.isChecked() if self.switch.supports_poe else False
                 
                 # Configurer tous les ports dans la plage
                 for port in range(start, end + 1):
-                    self.switch.set_port_config(port, mode, vlan)
+                    self.switch.set_port_config(port, mode, vlan, poe_enabled)
                 
                 # Mettre à jour l'affichage
                 self.switch_widget.update()
-                
                 if ENDORIUM_AVAILABLE:
-                    logger.info(f"Ports {start}-{end} configurés en mode {mode}")
-                
+                    logger.info(f"Ports {start}-{end} configurés en mode {mode}" + 
+                                (f", PoE: {poe_enabled}" if self.switch.supports_poe else ""))
                 QMessageBox.information(self, "Succès", f"Ports {start} à {end} configurés en mode {mode}")
                 
             except ValueError as e:
@@ -1116,6 +1334,16 @@ class MainWindow(QMainWindow):
         self.config_output.setPlainText(config_text)
         if ENDORIUM_AVAILABLE:
             logger.info("Configuration générée")
+        # Proposer l'envoi via TFTP après génération
+        if TFTP_AVAILABLE:
+            réponse = QMessageBox.question(
+                self,
+                "Envoyer via TFTP",
+                "La configuration a été générée. Voulez-vous l'envoyer via TFTP ?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if réponse == QMessageBox.Yes:
+                self.send_config_via_tftp()
     
     def save_config(self):
         if not self.config_output.toPlainText():
@@ -1132,6 +1360,30 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Succès", f"Configuration enregistrée dans {filepath}")
                 if ENDORIUM_AVAILABLE:
                     logger.info(f"Configuration enregistrée dans {filepath}")
+                # Proposer l'envoi via TFTP après sauvegarde
+                if TFTP_AVAILABLE:
+                    rep = QMessageBox.question(
+                        self,
+                        "Envoyer via TFTP",
+                        "Configuration enregistrée. Voulez-vous l'envoyer via TFTP ?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if rep == QMessageBox.Yes:
+                        switch_ip, ok = QInputDialog.getText(
+                            self,
+                            "Adresse IP du Switch",
+                            "Entrez l'adresse IP du switch cible :"
+                        )
+                        if ok and switch_ip:
+                            success, message = upload_config_via_tftp(
+                                self.config_output.toPlainText(), switch_ip
+                            )
+                            if success:
+                                QMessageBox.information(self, "Succès", f"Envoyé via TFTP : {message}")
+                                if ENDORIUM_AVAILABLE:
+                                    logger.info(f"TFTP envoyé : {message}")
+                            else:
+                                QMessageBox.critical(self, "Erreur", f"Échec TFTP : {message}")
         except Exception as e:
             QMessageBox.critical(self, "Erreur", f"Impossible d'enregistrer le fichier: {str(e)}")
             if ENDORIUM_AVAILABLE:
@@ -1147,22 +1399,54 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Erreur", "Veuillez d'abord générer la configuration.")
             return
         
-        try:
-            from PySide6.QtWidgets import QFileDialog
-            filepath, _ = QFileDialog.getSaveFileName(self, "Enregistrer temporairement la configuration", "", "Fichiers texte (*.txt);;Tous les fichiers (*)")
+        # Demander l'adresse IP du switch
+        switch_ip, ok = QInputDialog.getText(self, "Adresse IP du Switch", 
+                                        "Entrez l'adresse IP du switch cible:")
+        if not ok or not switch_ip:
+            return
             
-            if filepath:
-                with open(filepath, 'w') as f:
-                    f.write(self.config_output.toPlainText())
-                
-                # Demander l'adresse du serveur TFTP
-                tftp_server, ok = QInputDialog.getText(self, "Adresse TFTP", "Entrez l'adresse du serveur TFTP:")
-                if ok and tftp_server:
-                    upload_config_via_tftp(filepath, tftp_server)
-                    QMessageBox.information(self, "Succès", f"Configuration envoyée au serveur TFTP: {tftp_server}")
-                    if ENDORIUM_AVAILABLE:
-                        logger.info(f"Configuration envoyée au serveur TFTP: {tftp_server}")
+        # Créer une boîte de dialogue de progression
+        progress_dialog = QDialog(self)
+        progress_dialog.setWindowTitle("Envoi TFTP en cours")
+        progress_dialog.resize(400, 150)
+        
+        dialog_layout = QVBoxLayout(progress_dialog)
+        progress_label = QLabel(f"Envoi de la configuration au switch {switch_ip}...")
+        dialog_layout.addWidget(progress_label)
+        
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 0)  # Barre de progression indéterminée
+        dialog_layout.addWidget(progress_bar)
+        
+        status_label = QLabel("Préparation de l'envoi...")
+        dialog_layout.addWidget(status_label)
+        
+        # Montrer la boîte de dialogue sans bloquer
+        progress_dialog.show()
+        QApplication.processEvents()
+        
+        try:
+            # Envoi de la configuration directement via la fonction TFTP
+            config_text = self.config_output.toPlainText()
+            status_label.setText("Envoi en cours...")
+            QApplication.processEvents()
+            
+            success, message = upload_config_via_tftp(config_text, switch_ip)
+            
+            # Fermer la boîte de dialogue de progression
+            progress_dialog.close()
+            
+            if success:
+                QMessageBox.information(self, "Succès", f"Configuration envoyée avec succès: {message}")
+                if ENDORIUM_AVAILABLE:
+                    logger.info(f"Configuration envoyée au switch {switch_ip} via TFTP: {message}")
+            else:
+                QMessageBox.critical(self, "Erreur", f"Échec de l'envoi TFTP: {message}")
+                if ENDORIUM_AVAILABLE:
+                    logger.error(f"Échec de l'envoi TFTP vers {switch_ip}: {message}")
+                    
         except Exception as e:
+            progress_dialog.close()
             QMessageBox.critical(self, "Erreur", f"Impossible d'envoyer la configuration via TFTP: {str(e)}")
             if ENDORIUM_AVAILABLE:
                 logger.error(f"Erreur lors de l'envoi via TFTP: {str(e)}")
@@ -1172,3 +1456,4 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+

@@ -39,19 +39,22 @@ class TFTPServerThread(Thread):
         self.ip = ip
         self.port = port
         self.server = None
+        self.success = False
+        self.error_message = None
         
     def run(self):
         """Démarrer le serveur TFTP"""
         if not TFTP_AVAILABLE:
-            print("Module tftpy non disponible. Impossible de démarrer le serveur TFTP.")
+            self.error_message = "Module tftpy non disponible. Impossible de démarrer le serveur TFTP."
             return
         
         try:
             # Créer et démarrer le serveur
             self.server = tftpy.TftpServer(self.root_path)
             self.server.listen(self.ip, self.port)
+            self.success = True
         except Exception as e:
-            print(f"Erreur du serveur TFTP: {str(e)}")
+            self.error_message = f"Erreur du serveur TFTP: {str(e)}"
     
     def stop(self):
         """Arrêter le serveur TFTP"""
@@ -64,8 +67,19 @@ class TFTPServerThread(Thread):
             except:
                 pass
 
-def upload_config_via_tftp(config_text, switch_ip, filename="config.txt"):
-    """Télécharger une configuration vers un switch via TFTP"""
+def upload_config_via_tftp(config_text, switch_ip, filename="config.txt", timeout=30):
+    """
+    Télécharger une configuration vers un switch via TFTP
+    
+    Args:
+        config_text (str): Texte de configuration à envoyer
+        switch_ip (str): Adresse IP du switch
+        filename (str): Nom du fichier à créer sur le switch
+        timeout (int): Délai d'attente en secondes
+    
+    Returns:
+        tuple: (succès, message)
+    """
     if not TFTP_AVAILABLE:
         return False, "Module TFTP non disponible. Installez tftpy avec 'pip install tftpy'."
     
@@ -87,20 +101,30 @@ def upload_config_via_tftp(config_text, switch_ip, filename="config.txt"):
         server.start()
         
         # Attendre que le serveur démarre
-        time.sleep(1)
+        start_time = time.time()
+        while not server.success and server.error_message is None and time.time() - start_time < 5:
+            time.sleep(0.5)
+            
+        if not server.success:
+            if server.error_message:
+                return False, server.error_message
+            return False, "Le serveur TFTP n'a pas pu démarrer dans le délai imparti."
         
-        # Le client TFTP envoie une requête de téléchargement au switch
-        # Mais en réalité, c'est le switch qui va venir chercher le fichier
-        client = tftpy.TftpClient(switch_ip, 69)
-        client.upload(filename, config_path)
-        
-        # Arrêter le serveur
-        server.stop()
-        
-        return True, f"Configuration envoyée avec succès à {switch_ip} via TFTP."
+        try:
+            # Le client TFTP envoie une requête de téléchargement au switch
+            client = tftpy.TftpClient(switch_ip, 69)
+            # Le 2e paramètre de upload désigne le nom du fichier sur le serveur
+            client.upload(filename, config_path)
+            return True, f"Configuration envoyée avec succès à {switch_ip} via TFTP."
+        except tftpy.TftpException as e:
+            return False, f"Erreur TFTP: {str(e)}"
     except Exception as e:
         return False, f"Erreur lors de l'envoi via TFTP: {str(e)}"
     finally:
+        # Arrêter le serveur
+        if 'server' in locals():
+            server.stop()
+        
         # Nettoyer
         try:
             os.remove(config_path)
