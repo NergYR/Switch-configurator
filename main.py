@@ -122,8 +122,30 @@ class Switch:
         # Vérifier si le switch supporte le PoE
         self.supports_poe = self._supports_poe()
         
+        # --- Attributs SNMP ---
+        self.snmp_enabled = False
+        self.snmp_community = "public"
+        self.snmp_version = "2c"
+        self.snmp_location = ""
+        self.snmp_contact = ""
+        
+        # --- Attributs SSH ---
+        self.ssh_enabled = False
+        self.ssh_version = "2"
+        self.ssh_timeout = "60"
+        self.ssh_auth_retries = "3"
+        self.ssh_key_auth = False
+        
+        # --- Attributs Spanning Tree ---
+        self.stp_enabled = True
+        self.stp_mode = "rapid-pvst"  # rapid-pvst, pvst, mst
+        self.stp_priority = "32768"  # valeur par défaut
+        self.stp_portfast = True
+        self.stp_bpduguard = True
+        self.stp_loopguard = False
+        
         if ENDORIUM_AVAILABLE:
-            logger.info(f"Switch {brand} {model} initialisé")
+            logger.info(f"Switch {brand} {model} initialisé avec configurations par défaut")
     
     def _load_template(self, brand, model):
         template_manager = SwitchTemplateManager()
@@ -177,6 +199,41 @@ class Switch:
             logger.info(f"Hostname changé: {self.hostname} -> {hostname}")
         self.hostname = hostname
     
+    def set_snmp(self, enabled, community="public", version="2c", location="", contact=""):
+        """Configure les paramètres SNMP"""
+        self.snmp_enabled = enabled
+        self.snmp_community = community
+        self.snmp_version = version
+        self.snmp_location = location
+        self.snmp_contact = contact
+        
+        if ENDORIUM_AVAILABLE:
+            logger.info(f"SNMP {'activé' if enabled else 'désactivé'}, communauté={community}, version={version}")
+
+    def set_ssh(self, enabled, version="2", timeout="60", auth_retries="3", key_auth=False):
+        """Configure les paramètres SSH"""
+        self.ssh_enabled = enabled
+        self.ssh_version = version
+        self.ssh_timeout = timeout
+        self.ssh_auth_retries = auth_retries
+        self.ssh_key_auth = key_auth
+        
+        if ENDORIUM_AVAILABLE:
+            logger.info(f"SSH {'activé' if enabled else 'désactivé'}, version={version}, timeout={timeout}")
+
+    def set_spanning_tree(self, enabled, mode="rapid-pvst", priority="32768", 
+                         portfast=True, bpduguard=True, loopguard=False):
+        """Configure les paramètres Spanning Tree"""
+        self.stp_enabled = enabled
+        self.stp_mode = mode
+        self.stp_priority = priority
+        self.stp_portfast = portfast
+        self.stp_bpduguard = bpduguard
+        self.stp_loopguard = loopguard
+        
+        if ENDORIUM_AVAILABLE:
+            logger.info(f"Spanning Tree {'activé' if enabled else 'désactivé'}, mode={mode}")
+
     @log_function_call if ENDORIUM_AVAILABLE else lambda f: f
     def generate_config(self):
         if ENDORIUM_AVAILABLE:
@@ -232,6 +289,45 @@ class Switch:
                 if "default_commands" in self.template:
                     for cmd in self.template["default_commands"]:
                         config.append(cmd.replace("{hostname}", self.hostname))
+                
+                # --- Configuration Spanning Tree ---
+                if self.stp_enabled:
+                    config.append(f"spanning-tree mode {self.stp_mode}")
+                    config.append(f"spanning-tree vlan 1-4094 priority {self.stp_priority}")
+                    if self.stp_portfast:
+                        config.append("spanning-tree portfast default")
+                    if self.stp_bpduguard:
+                        config.append("spanning-tree portfast bpduguard default")
+                    if self.stp_loopguard:
+                        config.append("spanning-tree loopguard default")
+                else:
+                    config.append("no spanning-tree")
+                
+                # --- Sécurité de base ---
+                config.append("ip dhcp snooping")
+                config.append("ip dhcp snooping vlan all")
+                
+                # --- SNMP si activé ---
+                if self.snmp_enabled:
+                    config.append(f"snmp-server community {self.snmp_community} RO")
+                    if self.snmp_version:
+                        config.append(f"snmp-server enable traps")
+                    if self.snmp_location:
+                        config.append(f"snmp-server location {self.snmp_location}")
+                    if self.snmp_contact:
+                        config.append(f"snmp-server contact {self.snmp_contact}")
+                
+                # --- SSH si activé ---
+                if self.ssh_enabled:
+                    config.append(f"ip ssh version {self.ssh_version}")
+                    config.append(f"ip ssh time-out {self.ssh_timeout}")
+                    config.append(f"ip ssh authentication-retries {self.ssh_auth_retries}")
+                    config.append("line vty 0 15")
+                    config.append(" transport input ssh")
+                    if not self.ssh_key_auth:
+                        config.append(" login local")
+                    else:
+                        config.append(" login")
             
             elif self.brand.lower() == "hp":
                 config.append("configure")
@@ -1169,6 +1265,156 @@ class MainWindow(QMainWindow):
             config_layout.addWidget(tftp_btn)
         
         tabs.addTab(config_tab, "Configuration")
+        
+        # Onglet pour SNMP
+        snmp_tab = QWidget()
+        snmp_layout = QFormLayout(snmp_tab)
+        
+        # Active/désactive SNMP
+        snmp_enabled_checkbox = QCheckBox("Activer SNMP")
+        snmp_enabled_checkbox.setChecked(self.switch.snmp_enabled)
+        snmp_layout.addRow("", snmp_enabled_checkbox)
+        
+        # Version SNMP
+        snmp_version_combo = QComboBox()
+        snmp_version_combo.addItems(["1", "2c", "3"])
+        snmp_version_combo.setCurrentText(self.switch.snmp_version)
+        snmp_layout.addRow("Version SNMP:", snmp_version_combo)
+        
+        # Communauté SNMP
+        snmp_community_input = QLineEdit(self.switch.snmp_community)
+        snmp_community_input.setPlaceholderText("Communauté SNMP")
+        snmp_layout.addRow("Communauté:", snmp_community_input)
+        
+        # Emplacement SNMP
+        snmp_location_input = QLineEdit(self.switch.snmp_location)
+        snmp_location_input.setPlaceholderText("Localisation")
+        snmp_layout.addRow("Localisation:", snmp_location_input)
+        
+        # Contact SNMP
+        snmp_contact_input = QLineEdit(self.switch.snmp_contact)
+        snmp_contact_input.setPlaceholderText("Contact administrateur")
+        snmp_layout.addRow("Contact:", snmp_contact_input)
+        
+        # Connexion des signaux pour mettre à jour les attributs du switch
+        def update_snmp_config():
+            self.switch.set_snmp(
+                snmp_enabled_checkbox.isChecked(),
+                snmp_community_input.text(),
+                snmp_version_combo.currentText(),
+                snmp_location_input.text(),
+                snmp_contact_input.text()
+            )
+        
+        snmp_enabled_checkbox.stateChanged.connect(update_snmp_config)
+        snmp_version_combo.currentTextChanged.connect(update_snmp_config)
+        snmp_community_input.textChanged.connect(update_snmp_config)
+        snmp_location_input.textChanged.connect(update_snmp_config)
+        snmp_contact_input.textChanged.connect(update_snmp_config)
+        
+        tabs.addTab(snmp_tab, "SNMP")
+        
+        # Onglet pour SSH
+        ssh_tab = QWidget()
+        ssh_layout = QFormLayout(ssh_tab)
+        
+        # Active/désactive SSH
+        ssh_enabled_checkbox = QCheckBox("Activer SSH")
+        ssh_enabled_checkbox.setChecked(self.switch.ssh_enabled)
+        ssh_layout.addRow("", ssh_enabled_checkbox)
+        
+        # Version SSH
+        ssh_version_combo = QComboBox()
+        ssh_version_combo.addItems(["1", "2"])
+        ssh_version_combo.setCurrentText(self.switch.ssh_version)
+        ssh_layout.addRow("Version SSH:", ssh_version_combo)
+        
+        # Timeout SSH
+        ssh_timeout_input = QLineEdit(self.switch.ssh_timeout)
+        ssh_timeout_input.setPlaceholderText("Délai d'attente (secondes)")
+        ssh_layout.addRow("Timeout:", ssh_timeout_input)
+        
+        # Nombre de tentatives d'authentification
+        ssh_retries_input = QLineEdit(self.switch.ssh_auth_retries)
+        ssh_retries_input.setPlaceholderText("Nombre d'essais")
+        ssh_layout.addRow("Tentatives d'auth:", ssh_retries_input)
+        
+        # Authentification par clé
+        ssh_key_auth_checkbox = QCheckBox("Utiliser l'authentification par clé")
+        ssh_key_auth_checkbox.setChecked(self.switch.ssh_key_auth)
+        ssh_layout.addRow("", ssh_key_auth_checkbox)
+        
+        # Connexion des signaux pour mettre à jour les attributs du switch
+        def update_ssh_config():
+            self.switch.set_ssh(
+                ssh_enabled_checkbox.isChecked(),
+                ssh_version_combo.currentText(),
+                ssh_timeout_input.text(),
+                ssh_retries_input.text(),
+                ssh_key_auth_checkbox.isChecked()
+            )
+        
+        ssh_enabled_checkbox.stateChanged.connect(update_ssh_config)
+        ssh_version_combo.currentTextChanged.connect(update_ssh_config)
+        ssh_timeout_input.textChanged.connect(update_ssh_config)
+        ssh_retries_input.textChanged.connect(update_ssh_config)
+        ssh_key_auth_checkbox.stateChanged.connect(update_ssh_config)
+        
+        tabs.addTab(ssh_tab, "SSH")
+        
+        # Nouvel onglet pour Spanning Tree
+        stp_tab = QWidget()
+        stp_layout = QFormLayout(stp_tab)
+        
+        # Active/désactive Spanning Tree
+        stp_enabled_checkbox = QCheckBox("Activer Spanning Tree")
+        stp_enabled_checkbox.setChecked(self.switch.stp_enabled)
+        stp_layout.addRow("", stp_enabled_checkbox)
+        
+        # Mode Spanning Tree
+        stp_mode_combo = QComboBox()
+        stp_mode_combo.addItems(["rapid-pvst", "pvst", "mst"])
+        stp_mode_combo.setCurrentText(self.switch.stp_mode)
+        stp_layout.addRow("Mode STP:", stp_mode_combo)
+        
+        # Priorité Spanning Tree
+        stp_priority_combo = QComboBox()
+        stp_priority_combo.addItems(["0", "4096", "8192", "12288", "16384", "20480", "24576", "28672", "32768", "36864", "40960", "45056", "49152", "53248", "57344", "61440"])
+        stp_priority_combo.setCurrentText(self.switch.stp_priority)
+        stp_layout.addRow("Priorité:", stp_priority_combo)
+        
+        # Paramètres supplémentaires
+        stp_portfast_checkbox = QCheckBox("Activer PortFast par défaut")
+        stp_portfast_checkbox.setChecked(self.switch.stp_portfast)
+        stp_layout.addRow("", stp_portfast_checkbox)
+        
+        stp_bpduguard_checkbox = QCheckBox("Activer BPDU Guard")
+        stp_bpduguard_checkbox.setChecked(self.switch.stp_bpduguard)
+        stp_layout.addRow("", stp_bpduguard_checkbox)
+        
+        stp_loopguard_checkbox = QCheckBox("Activer Loop Guard")
+        stp_loopguard_checkbox.setChecked(self.switch.stp_loopguard)
+        stp_layout.addRow("", stp_loopguard_checkbox)
+        
+        # Connexion des signaux pour mettre à jour les attributs du switch
+        def update_stp_config():
+            self.switch.set_spanning_tree(
+                stp_enabled_checkbox.isChecked(),
+                stp_mode_combo.currentText(),
+                stp_priority_combo.currentText(),
+                stp_portfast_checkbox.isChecked(),
+                stp_bpduguard_checkbox.isChecked(),
+                stp_loopguard_checkbox.isChecked()
+            )
+        
+        stp_enabled_checkbox.stateChanged.connect(update_stp_config)
+        stp_mode_combo.currentTextChanged.connect(update_stp_config)
+        stp_priority_combo.currentTextChanged.connect(update_stp_config)
+        stp_portfast_checkbox.stateChanged.connect(update_stp_config)
+        stp_bpduguard_checkbox.stateChanged.connect(update_stp_config)
+        stp_loopguard_checkbox.stateChanged.connect(update_stp_config)
+        
+        tabs.addTab(stp_tab, "Spanning Tree")
         
         # Onglet d'informations
         info_tab = QWidget()
