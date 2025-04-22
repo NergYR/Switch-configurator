@@ -135,6 +135,7 @@ class Switch:
         self.ssh_timeout = "60"
         self.ssh_auth_retries = "3"
         self.ssh_key_auth = False
+        self.ssh_users = []  # liste de dicts {login, password, privilege}
         
         # --- Attributs Spanning Tree ---
         self.stp_enabled = True
@@ -328,6 +329,9 @@ class Switch:
                         config.append(" login local")
                     else:
                         config.append(" login")
+                    # commandes pour chaque utilisateur SSH
+                    for user in self.ssh_users:
+                        config.append(f"username {user['login']} privilege {user['privilege']} secret {user['password']}")
             
             elif self.brand.lower() == "hp":
                 config.append("configure")
@@ -1190,6 +1194,131 @@ class VlanInterfaceDialog(QDialog):
             }
         return result
 
+# Dialogue pour gérer les utilisateurs SSH
+class SSHUserDialog(QDialog):
+    def __init__(self, ssh_users, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Gestion des utilisateurs SSH")
+        self.resize(500, 300)
+        self.ssh_users = ssh_users.copy()
+        
+        layout = QVBoxLayout(self)
+        
+        # Table des utilisateurs SSH
+        self.user_table = QTableWidget(0, 3)
+        self.user_table.setHorizontalHeaderLabels(["Login", "Mot de passe", "Privilège"])
+        self.user_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.user_table)
+        
+        # Formulaire d'ajout
+        form_layout = QHBoxLayout()
+        self.login_input = QLineEdit()
+        self.login_input.setPlaceholderText("Login")
+        form_layout.addWidget(self.login_input)
+        
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Mot de passe")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        form_layout.addWidget(self.password_input)
+        
+        self.privilege_input = QLineEdit()
+        self.privilege_input.setPlaceholderText("Privilège (0-15)")
+        form_layout.addWidget(self.privilege_input)
+        
+        add_btn = QPushButton("Ajouter")
+        add_btn.clicked.connect(self.add_user)
+        form_layout.addWidget(add_btn)
+        
+        layout.addLayout(form_layout)
+        
+        # Bouton de suppression
+        delete_btn = QPushButton("Supprimer l'utilisateur sélectionné")
+        delete_btn.clicked.connect(self.delete_selected_user)
+        layout.addWidget(delete_btn)
+        
+        # Boutons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        # Charger les utilisateurs existants
+        self.load_users()
+    
+    def load_users(self):
+        for user in self.ssh_users:
+            row_position = self.user_table.rowCount()
+            self.user_table.insertRow(row_position)
+            self.user_table.setItem(row_position, 0, QTableWidgetItem(user['login']))
+            self.user_table.setItem(row_position, 1, QTableWidgetItem(user['password']))
+            self.user_table.setItem(row_position, 2, QTableWidgetItem(str(user['privilege'])))
+    
+    def add_user(self):
+        try:
+            login = self.login_input.text()
+            password = self.password_input.text()
+            privilege = int(self.privilege_input.text())
+            
+            if not login or not password or privilege < 0 or privilege > 15:
+                raise ValueError("Informations utilisateur invalides")
+            
+            # Vérifier si l'utilisateur existe déjà
+            for row in range(self.user_table.rowCount()):
+                if self.user_table.item(row, 0).text() == login:
+                    response = QMessageBox.question(self, "Utilisateur existant", 
+                                                 f"L'utilisateur {login} existe déjà. Voulez-vous le remplacer ?",
+                                                 QMessageBox.Yes | QMessageBox.No)
+                    if response == QMessageBox.No:
+                        return
+                    
+                    # Mettre à jour la ligne existante
+                    self.user_table.setItem(row, 1, QTableWidgetItem(password))
+                    self.user_table.setItem(row, 2, QTableWidgetItem(str(privilege)))
+                    break
+            else:
+                # Ajouter à la table
+                row_position = self.user_table.rowCount()
+                self.user_table.insertRow(row_position)
+                self.user_table.setItem(row_position, 0, QTableWidgetItem(login))
+                self.user_table.setItem(row_position, 1, QTableWidgetItem(password))
+                self.user_table.setItem(row_position, 2, QTableWidgetItem(str(privilege)))
+            
+            # Effacer les champs
+            self.login_input.clear()
+            self.password_input.clear()
+            self.privilege_input.clear()
+            
+            # Mettre à jour la liste
+            self.ssh_users = [{'login': self.user_table.item(row, 0).text(),
+                               'password': self.user_table.item(row, 1).text(),
+                               'privilege': int(self.user_table.item(row, 2).text())}
+                              for row in range(self.user_table.rowCount())]
+            
+        except ValueError as e:
+            QMessageBox.warning(self, "Erreur", str(e))
+    
+    def delete_selected_user(self):
+        selected_rows = self.user_table.selectedIndexes()
+        if not selected_rows:
+            QMessageBox.warning(self, "Avertissement", "Veuillez sélectionner un utilisateur à supprimer.")
+            return
+        
+        row = selected_rows[0].row()
+        login = self.user_table.item(row, 0).text()
+        
+        response = QMessageBox.question(self, "Confirmation", 
+                                     f"Êtes-vous sûr de vouloir supprimer l'utilisateur {login} ?",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if response == QMessageBox.Yes:
+            self.user_table.removeRow(row)
+            self.ssh_users = [{'login': self.user_table.item(row, 0).text(),
+                               'password': self.user_table.item(row, 1).text(),
+                               'privilege': int(self.user_table.item(row, 2).text())}
+                              for row in range(self.user_table.rowCount())]
+    
+    def accept(self):
+        super().accept()
+
 # Fenêtre principale
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1376,9 +1505,9 @@ class MainWindow(QMainWindow):
         ssh_layout = QFormLayout(ssh_tab)
         
         # Active/désactive SSH
-        ssh_enabled_checkbox = QCheckBox("Activer SSH")
-        ssh_enabled_checkbox.setChecked(self.switch.ssh_enabled)
-        ssh_layout.addRow("", ssh_enabled_checkbox)
+        self.ssh_enabled_checkbox = QCheckBox("Activer SSH")
+        self.ssh_enabled_checkbox.setChecked(self.switch.ssh_enabled)
+        ssh_layout.addRow("", self.ssh_enabled_checkbox)
         
         # Version SSH
         ssh_version_combo = QComboBox()
@@ -1401,21 +1530,28 @@ class MainWindow(QMainWindow):
         ssh_key_auth_checkbox.setChecked(self.switch.ssh_key_auth)
         ssh_layout.addRow("", ssh_key_auth_checkbox)
         
+        # Bouton pour gérer les utilisateurs SSH
+        ssh_users_btn = QPushButton("Gérer les utilisateurs SSH")
+        ssh_users_btn.clicked.connect(self.show_ssh_user_dialog)
+        ssh_layout.addRow("", ssh_users_btn)
+        
         # Connexion des signaux pour mettre à jour les attributs du switch
         def update_ssh_config():
             self.switch.set_ssh(
-                ssh_enabled_checkbox.isChecked(),
+                self.ssh_enabled_checkbox.isChecked(),
                 ssh_version_combo.currentText(),
                 ssh_timeout_input.text(),
                 ssh_retries_input.text(),
                 ssh_key_auth_checkbox.isChecked()
             )
         
-        ssh_enabled_checkbox.stateChanged.connect(update_ssh_config)
-        ssh_version_combo.currentTextChanged.connect(update_ssh_config)
-        ssh_timeout_input.textChanged.connect(update_ssh_config)
-        ssh_retries_input.textChanged.connect(update_ssh_config)
-        ssh_key_auth_checkbox.stateChanged.connect(update_ssh_config)
+        self.ssh_enabled_checkbox.stateChanged.connect(update_ssh_config)
+        
+        # Si on active SSH et qu'il n'y a pas encore d'utilisateurs, on ouvre la popup
+        def on_ssh_enable_popup(state):
+            if state == Qt.Checked and not self.switch.ssh_users:
+                self.show_ssh_user_dialog()
+        self.ssh_enabled_checkbox.stateChanged.connect(on_ssh_enable_popup)
         
         tabs.addTab(ssh_tab, "SSH")
         
@@ -1663,6 +1799,13 @@ class MainWindow(QMainWindow):
             # Mettre à jour l'onglet des interfaces VLAN
             if hasattr(self, "setCentralWidget"):  # Pour éviter des erreurs si l'UI n'est pas encore initialisée
                 self.setup_main_ui()
+    
+    def show_ssh_user_dialog(self):
+        dialog = SSHUserDialog(self.switch.ssh_users, self)
+        if dialog.exec():
+            self.switch.ssh_users = dialog.ssh_users.copy()
+            if ENDORIUM_AVAILABLE:
+                logger.info(f"Utilisateurs SSH configurés: {len(self.switch.ssh_users)}")
     
     def generate_config(self):
         config_text = self.switch.generate_config()
