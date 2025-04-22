@@ -456,11 +456,13 @@ class Switch:
             
             elif self.brand.lower() == "alcatel":
                 config.append("configure terminal")
-                config.append(f"hostname {self.hostname}")
+                config.append(f"system name {self.hostname}")
                 
                 # Configuration des VLANs
                 for vlan_id, vlan_name in self.vlans.items():
-                    config.append(f"vlan {vlan_id} name {vlan_name} admin-state enable")
+                    config.append(f"vlan {vlan_id}")
+                    config.append(f" name \"{vlan_name}\"")
+                    config.append(" exit")
                 
                 # Configuration des ports
                 for port, settings in self.ports.items():
@@ -474,25 +476,65 @@ class Switch:
                         
                     if settings['mode'] == 'access':
                         if settings.get('vlan'):
-                            config.append(f" vlan port default {settings['vlan']} enable")
+                            config.append(f" vlan {settings['vlan']} port default")
                     elif settings['mode'] == 'trunk':
+                        config.append(" spanning-tree auto-edge-port disable")
                         for vlan_id in self.vlans.keys():
-                            config.append(f" vlan port {vlan_id} enable")
+                            config.append(f" vlan {vlan_id} port")
                     
                     # Configuration PoE si supporté et activé
                     if self.supports_poe and settings.get('poe', False):
-                        config.append(" power poe admin-state enable")
+                        config.append(" power over-ethernet admin-state enable")
+                        config.append(" power over-ethernet priority high")
                     elif self.supports_poe and not settings.get('poe', False):
-                        config.append(" power poe admin-state disable")
+                        config.append(" power over-ethernet admin-state disable")
                     
-                    config.append("exit")
+                    config.append(" exit")
                 
                 # Configuration des interfaces VLAN
                 for vlan_id, vlan_settings in self.vlan_interfaces.items():
-                    config.append(f"interfaces vlan {vlan_id}")
+                    config.append(f"vlan {vlan_id}")
                     if 'ip' in vlan_settings and 'mask' in vlan_settings:
-                        config.append(f" ip address {vlan_settings['ip']} {vlan_settings['mask']}")
-                    config.append("exit")
+                        config.append(f" router interface")
+                        config.append(f" address {vlan_settings['ip']} mask {vlan_settings['mask']}")
+                        if vlan_settings.get('shutdown', False):
+                            config.append(" admin-state disable")
+                        else:
+                            config.append(" admin-state enable")
+                        if 'description' in vlan_settings and vlan_settings['description']:
+                            config.append(f" description \"{vlan_settings['description']}\"")
+                        config.append(" exit")
+                    config.append(" exit")
+                
+                # Configuration SNMP si activée
+                if self.snmp_enabled:
+                    config.append(f"snmp community map {self.snmp_community} user \"admin\" on")
+                    if self.snmp_location:
+                        config.append(f"snmp system location \"{self.snmp_location}\"")
+                    if self.snmp_contact:
+                        config.append(f"snmp system contact \"{self.snmp_contact}\"") 
+                
+                # Configuration SSH si activée
+                if self.ssh_enabled:
+                    config.append("ip service ssh")
+                    config.append(f"ip service ssh version v{self.ssh_version}")
+                    config.append(f"ip service ssh timeout {self.ssh_timeout}")
+                else:
+                    config.append("no ip service ssh")
+                
+                # Configuration Spanning Tree
+                if self.stp_enabled:
+                    config.append("spanning-tree admin-state enable")
+                    mode_map = {"rapid-pvst": "rstp", "pvst": "flat", "mst": "mstp"}
+                    stp_mode = mode_map.get(self.stp_mode, "rstp")
+                    config.append(f"spanning-tree mode {stp_mode}")
+                    config.append(f"spanning-tree priority {self.stp_priority}")
+                    if self.stp_portfast:
+                        config.append("spanning-tree auto-edge-port enable")
+                    if self.stp_bpduguard:
+                        config.append("spanning-tree bpdu-guard enable")
+                else:
+                    config.append("spanning-tree admin-state disable")
                 
                 # Ajouter des commandes de base à partir du template
                 if "default_commands" in self.template:
@@ -529,7 +571,9 @@ class BrandModelSelectionDialog(QDialog):
         brand_layout = QHBoxLayout()
         brand_layout.addWidget(QLabel("Marque:"))
         self.brand_combo = QComboBox()
-        self.brand_combo.addItems(self.template_manager.get_available_brands())
+        # Récupérer et trier les marques disponibles
+        brands = sorted(self.template_manager.get_available_brands())
+        self.brand_combo.addItems(brands)
         self.brand_combo.currentIndexChanged.connect(self.update_models)
         brand_layout.addWidget(self.brand_combo)
         layout.addLayout(brand_layout)
@@ -554,12 +598,25 @@ class BrandModelSelectionDialog(QDialog):
     def update_models(self):
         self.model_combo.clear()
         selected_brand = self.brand_combo.currentText()
-        models = self.template_manager.get_available_models(selected_brand)
+        # Récupérer et trier les modèles disponibles pour cette marque
+        models = sorted(self.template_manager.get_available_models(selected_brand))
         self.model_combo.addItems(models)
     
     def accept(self):
         self.selected_brand = self.brand_combo.currentText()
         self.selected_model = self.model_combo.currentText()
+        
+        # S'assurer qu'un modèle est sélectionné
+        if not self.selected_model:
+            QMessageBox.warning(self, "Avertissement", "Veuillez sélectionner un modèle.")
+            return
+            
+        # Vérifier que le template existe bien
+        template = self.template_manager.load_template(self.selected_brand, self.selected_model)
+        if not template:
+            QMessageBox.warning(self, "Erreur", f"Le template pour {self.selected_brand} {self.selected_model} est introuvable ou invalide.")
+            return
+            
         super().accept()
 
 # Fenêtre pour configurer les VLANs
@@ -1734,5 +1791,6 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
 
 
