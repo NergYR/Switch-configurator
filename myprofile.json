@@ -1,0 +1,113 @@
+{
+  "vlans": {
+    "10": "admin",
+    "14": "ToIP"
+  },
+  "ports": {
+    "1": {
+      "mode": "access",
+      "vlan": 14,
+      "poe": true
+    },
+    "2": {
+      "mode": "access",
+      "vlan": 14,
+      "poe": true
+    },
+    "3": {
+      "mode": "access",
+      "vlan": 14,
+      "poe": true
+    },
+    "4": {
+      "mode": "access",
+      "vlan": 14,
+      "poe": true
+    },
+    "5": {
+      "mode": "access",
+      "vlan": 14,
+      "poe": true
+    },
+    "6": {
+      "mode": "access",
+      "vlan": 14,
+      "poe": true
+    },
+    "7": {
+      "mode": "access",
+      "vlan": 14,
+      "poe": true
+    },
+    "8": {
+      "mode": "access",
+      "vlan": 14,
+      "poe": true
+    },
+    "9": {
+      "mode": "shutdown",
+      "vlan": null,
+      "poe": false
+    },
+    "10": {
+      "mode": "shutdown",
+      "vlan": null,
+      "poe": false
+    },
+    "11": {
+      "mode": "trunk",
+      "vlan": null,
+      "poe": false
+    },
+    "12": {
+      "mode": "trunk",
+      "vlan": null,
+      "poe": false
+    }
+  },
+  "vlan_interfaces": {
+    "10": {
+      "ip": "192.168.1.254",
+      "mask": "255.255.255.0",
+      "shutdown": false,
+      "description": "Admin",
+      "dhcp_enabled": false
+    },
+    "14": {
+      "ip": "192.168.14.254",
+      "mask": "255.255.255.0",
+      "shutdown": false,
+      "description": "ToIP",
+      "dhcp_enabled": false
+    }
+  },
+  "snmp": {
+    "enabled": true,
+    "community": "byes",
+    "version": "2c",
+    "location": "",
+    "contact": ""
+  },
+  "ssh": {
+    "enabled": true,
+    "version": "2",
+    "timeout": "60",
+    "retries": "3",
+    "key": false,
+    "users": [
+      {
+        "login": "admin",
+        "password": "password",
+        "privilege": 15
+      }
+    ]
+  },
+  "stp": {
+    "enabled": true,
+    "mode": "rapid-pvst",
+    "priority": "32768",
+    "portfast": true,
+    "bpduguard": true,
+    "loopguard": false
+  }
+}

@@ -2,12 +2,13 @@ import sys
 import os
 import json
 import time
+import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QLabel, QPushButton, QComboBox, QLineEdit, QGridLayout,
                             QScrollArea, QTableWidget, QTableWidgetItem, QMessageBox,
                             QTabWidget, QFrame, QGroupBox, QFormLayout, QDialog, QDialogButtonBox,
-                            QTextEdit, QCheckBox, QProgressBar, QInputDialog)
-from PySide6.QtCore import Qt, QSize, QTimer
+                            QTextEdit, QCheckBox, QProgressBar, QInputDialog, QFileDialog)
+from PySide6.QtCore import Qt, QSize, QTimer, QSettings
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush
 
 # Configuration de l'application
@@ -41,7 +42,7 @@ except ImportError:
 
 # Importation des fonctions TFTP
 try:
-    from tftp_helper import is_tftp_available, upload_config_via_tftp
+    from tftp_helper import is_tftp_available, upload_config_via_tftp, check_connectivity
     TFTP_AVAILABLE = is_tftp_available()
     if ENDORIUM_AVAILABLE and TFTP_AVAILABLE:
         logger.info("Module TFTP disponible et chargé")
@@ -52,6 +53,20 @@ except ImportError:
     if ENDORIUM_AVAILABLE and logger is not None:
         logger.warning("Module TFTP non disponible. Installez-le avec 'pip install tftpy'")
     print("Module TFTP non disponible. Installez-le avec 'pip install tftpy'")
+
+# --- Nouveau : import et disponibilité console série ---
+try:
+    from serial_helper import is_serial_available, SerialConfigSender, list_available_serial_ports
+    SERIAL_AVAILABLE = is_serial_available()
+    if ENDORIUM_AVAILABLE and SERIAL_AVAILABLE:
+        logger.info("Module série disponible et chargé")
+    elif ENDORIUM_AVAILABLE:
+        logger.warning("Module série non disponible. Fonctionnalités console désactivées.")
+except ImportError:
+    SERIAL_AVAILABLE = False
+    if ENDORIUM_AVAILABLE and logger is not None:
+        logger.warning("Module série non disponible. Installez-le avec 'pip install pyserial'")
+    print("Module série non disponible. Installez-le avec 'pip install pyserial'")
 
 # Classe pour gérer les modèles de switch
 class SwitchTemplateManager:
@@ -1328,7 +1343,8 @@ class MainWindow(QMainWindow):
         
         self.switch = None
         
-        # Commencer par sélectionner la marque et le modèle
+        # stocker préférences
+        self.settings = QSettings("Endorium", "SwitchConfigurator")
         self.show_brand_model_dialog()
     
     def show_brand_model_dialog(self):
@@ -1444,12 +1460,28 @@ class MainWindow(QMainWindow):
         save_btn.clicked.connect(self.save_config)
         config_layout.addWidget(save_btn)
         
+        # profils
+        profil_layout = QHBoxLayout()
+        save_prof = QPushButton("Enregistrer profil")
+        save_prof.clicked.connect(self.save_profile)
+        load_prof = QPushButton("Charger profil")
+        load_prof.clicked.connect(self.load_profile)
+        profil_layout.addWidget(save_prof)
+        profil_layout.addWidget(load_prof)
+        config_layout.addLayout(profil_layout)
+        
         # Bouton pour envoyer la configuration via TFTP
         if TFTP_AVAILABLE:
             tftp_btn = QPushButton("Envoyer via TFTP")
             tftp_btn.clicked.connect(self.send_config_via_tftp)
             config_layout.addWidget(tftp_btn)
-        
+
+        # --- Nouveau : bouton pour console série ---
+        if SERIAL_AVAILABLE:
+            console_btn = QPushButton("Envoyer via console")
+            console_btn.clicked.connect(self.send_config_via_console)
+            config_layout.addWidget(console_btn)
+
         tabs.addTab(config_tab, "Configuration")
         
         # Onglet pour SNMP
@@ -1822,6 +1854,16 @@ class MainWindow(QMainWindow):
             )
             if réponse == QMessageBox.Yes:
                 self.send_config_via_tftp()
+        # --- Nouveau : proposer l'envoi via console après génération ---
+        if SERIAL_AVAILABLE:
+            resp = QMessageBox.question(
+                self,
+                "Envoyer via console",
+                "La configuration a été générée. Voulez‑vous l'envoyer via la console ?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if resp == QMessageBox.Yes:
+                self.send_config_via_console()
     
     def save_config(self):
         if not self.config_output.toPlainText():
@@ -1829,7 +1871,6 @@ class MainWindow(QMainWindow):
             return
         
         try:
-            from PySide6.QtWidgets import QFileDialog
             filepath, _ = QFileDialog.getSaveFileName(self, "Enregistrer la configuration", "", "Fichiers texte (*.txt);;Tous les fichiers (*)")
             
             if filepath:
@@ -1862,11 +1903,112 @@ class MainWindow(QMainWindow):
                                     logger.info(f"TFTP envoyé : {message}")
                             else:
                                 QMessageBox.critical(self, "Erreur", f"Échec TFTP : {message}")
+                # --- Nouveau : proposer console après sauvegarde ---
+                if SERIAL_AVAILABLE:
+                    r = QMessageBox.question(
+                        self,
+                        "Envoyer via console",
+                        "Configuration enregistrée. Voulez‑vous l'envoyer via la console ?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if r == QMessageBox.Yes:
+                        self.send_config_via_console()
         except Exception as e:
             QMessageBox.critical(self, "Erreur", f"Impossible d'enregistrer le fichier: {str(e)}")
             if ENDORIUM_AVAILABLE:
                 logger.error(f"Erreur lors de l'enregistrement: {str(e)}")
     
+    def save_profile(self):
+        """Sauvegarde profil JSON complet."""
+        fpath, _ = QFileDialog.getSaveFileName(self, "Enregistrer profil", "*.json", "JSON (*.json)")
+        if not fpath:
+            return
+        prof = {
+            "vlans": self.switch.vlans,
+            "ports": self.switch.ports,
+            "vlan_interfaces": self.switch.vlan_interfaces,
+            "snmp": {
+                "enabled": self.switch.snmp_enabled,
+                "community": self.switch.snmp_community,
+                "version": self.switch.snmp_version,
+                "location": self.switch.snmp_location,
+                "contact": self.switch.snmp_contact,
+            },
+            "ssh": {
+                "enabled": self.switch.ssh_enabled,
+                "version": self.switch.ssh_version,
+                "timeout": self.switch.ssh_timeout,
+                "retries": self.switch.ssh_auth_retries,
+                "key": self.switch.ssh_key_auth,
+                "users": self.switch.ssh_users,
+            },
+            "stp": {
+                "enabled": self.switch.stp_enabled,
+                "mode": self.switch.stp_mode,
+                "priority": self.switch.stp_priority,
+                "portfast": self.switch.stp_portfast,
+                "bpduguard": self.switch.stp_bpduguard,
+                "loopguard": self.switch.stp_loopguard,
+            },
+        }
+        with open(fpath, "w") as f:
+            json.dump(prof, f, indent=2)
+        QMessageBox.information(self, "Succès", "Profil enregistré")
+
+    def load_profile(self):
+        """Charge un profil JSON et applique."""
+        fpath, _ = QFileDialog.getOpenFileName(self, "Charger profil", "", "JSON (*.json)")
+        if fpath and ENDORIUM_AVAILABLE:
+            logger.debug(f"load_profile: selected file {fpath}")
+        if not fpath:
+            return
+        try:
+            if ENDORIUM_AVAILABLE:
+                logger.debug("load_profile: reading file content")
+            with open(fpath, "r") as f:
+                raw = f.read()
+            txt = re.sub(r'//.*', '', raw)
+            prof = json.loads(txt)
+            # Conversion des clés en int
+            vlans_raw = prof.get("vlans", {})
+            self.switch.vlans = {int(k): v for k, v in vlans_raw.items()}
+            ports_raw = prof.get("ports", {})
+            self.switch.ports = {int(k): v for k, v in ports_raw.items()}
+            vlan_if_raw = prof.get("vlan_interfaces", {})
+            self.switch.vlan_interfaces = {int(k): v for k, v in vlan_if_raw.items()}
+            sn = prof.get("snmp", {})
+            self.switch.set_snmp(
+                sn.get("enabled", False),
+                sn.get("community", ""),
+                sn.get("version", ""),
+                sn.get("location", ""),
+                sn.get("contact", ""),
+            )
+            sh = prof.get("ssh", {})
+            self.switch.set_ssh(
+                sh.get("enabled", False),
+                sh.get("version", ""),
+                sh.get("timeout", ""),
+                sh.get("retries", ""),
+                sh.get("key", False),
+            )
+            self.switch.ssh_users = sh.get("users", [])
+            st = prof.get("stp", {})
+            self.switch.set_spanning_tree(
+                st.get("enabled", True),
+                st.get("mode", ""),
+                st.get("priority", ""),
+                st.get("portfast", True),
+                st.get("bpduguard", True),
+                st.get("loopguard", False),
+            )
+            self.setup_main_ui()
+            QMessageBox.information(self, "Succès", "Profil chargé")
+        except Exception as e:
+            if ENDORIUM_AVAILABLE:
+                logger.exception("load_profile: exception during loading profile")
+            QMessageBox.warning(self, "Erreur", str(e))
+
     def send_config_via_tftp(self):
         """Envoie la configuration générée via TFTP."""
         if not TFTP_AVAILABLE:
@@ -1881,6 +2023,11 @@ class MainWindow(QMainWindow):
         switch_ip, ok = QInputDialog.getText(self, "Adresse IP du Switch", 
                                         "Entrez l'adresse IP du switch cible:")
         if not ok or not switch_ip:
+            return
+        
+        # ping / connectivité
+        if not check_connectivity(switch_ip):
+            QMessageBox.warning(self, "Erreur", "Switch non joignable (ping).")
             return
             
         # Créer une boîte de dialogue de progression
@@ -1928,6 +2075,63 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erreur", f"Impossible d'envoyer la configuration via TFTP: {str(e)}")
             if ENDORIUM_AVAILABLE:
                 logger.error(f"Erreur lors de l'envoi via TFTP: {str(e)}")
+
+    # --- Nouveau : méthode d'envoi via le port console série ---
+    def send_config_via_console(self):
+        if not SERIAL_AVAILABLE:
+            QMessageBox.warning(self, "Erreur", "Le module de communication série n'est pas disponible.")
+            return
+        if not self.config_output.toPlainText():
+            QMessageBox.warning(self, "Erreur", "Veuillez d'abord générer la configuration.")
+            return
+
+        # choix port COM auto
+        ports = list_available_serial_ports()
+        last = self.settings.value("last_com_port", "")
+        com_port, ok = QInputDialog.getItem(
+            self,
+            "Port COM",
+            "Sélectionnez port:",
+            ports,
+            ports.index(last) if last in ports else 0,
+            False,
+        )
+        if not ok:
+            return
+        self.settings.setValue("last_com_port", com_port)
+        baud, ok = QInputDialog.getInt(self, "Baudrate", "Entrez la vitesse (baud):", 9600, 300, 115200)
+        if not ok:
+            return
+
+        try:
+            sender = SerialConfigSender(com_port, baud)
+        except ImportError as e:
+            QMessageBox.critical(self, "Erreur", str(e))
+            return
+
+        if not sender.connect():
+            QMessageBox.critical(self, "Erreur", f"Impossible de se connecter sur {com_port} à {baud} bauds")
+            return
+
+        # Dialogue de progression
+        progress_dialog = QDialog(self)
+        progress_dialog.setWindowTitle("Envoi console en cours")
+        progress_dialog.resize(400, 150)
+        layout = QVBoxLayout(progress_dialog)
+        layout.addWidget(QLabel(f"Envoi sur {com_port} @ {baud} bauds..."))
+        pb = QProgressBar()
+        pb.setRange(0, 0)
+        layout.addWidget(pb)
+        status = QLabel("")
+        layout.addWidget(status)
+        progress_dialog.show()
+        QApplication.processEvents()
+
+        sender.on_line_sent = lambda line, i, total: status.setText(f"Ligne {i}/{total}")
+        sender.on_completed = lambda msg: (QMessageBox.information(self, "Succès", msg), progress_dialog.close())
+        sender.on_error = lambda msg: (QMessageBox.critical(self, "Erreur", msg), progress_dialog.close())
+
+        sender.send_configuration(self.config_output.toPlainText(), line_delay=0.5)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
